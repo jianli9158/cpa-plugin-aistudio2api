@@ -168,6 +168,67 @@ func TestAssistantStreamDecoderInvalidToolDetection(t *testing.T) {
 			t.Fatalf("finish reason=%q, want stop", finish)
 		}
 	})
+
+	t.Run("unclosed function_calls with ask_question call question decodes cleanly without invalidTool or overran", func(t *testing.T) {
+		questions, _ := json.Marshal([]map[string]any{{"question": assistantCallQuestion}})
+		decoder := &AssistantStreamDecoder{Functions: []string{"read_file"}}
+		callText := "```function_calls\n[{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.txt\"}}]"
+		payload := assistantStreamPayload(t,
+			assistantMessage("applet-1",
+				assistantModelStep(1, 1, callText, assistantActionTool([2]string{"tag", assistantQuestionTool}, [2]string{"questions", string(questions)})),
+			),
+		)
+		var events []Event
+		if err := DecodeAssistantStream(strings.NewReader(payload), decoder, func(event Event) error {
+			events = append(events, event)
+			return nil
+		}); err != nil {
+			t.Fatalf("DecodeAssistantStream failed: %v", err)
+		}
+		if decoder.invalidTool || decoder.overran || decoder.malformed || !decoder.called {
+			t.Fatalf("unexpected decoder flags: invalidTool=%v overran=%v malformed=%v called=%v", decoder.invalidTool, decoder.overran, decoder.malformed, decoder.called)
+		}
+		assertRecoveredToolCallEvents(t, events, "", "read_file", `{"path":"a.txt"}`)
+	})
+
+	t.Run("ask_question call question without function_calls block sets malformed not invalidTool", func(t *testing.T) {
+		questions, _ := json.Marshal([]map[string]any{{"question": assistantCallQuestion}})
+		for _, tc := range []struct {
+			name string
+			text string
+		}{
+			{name: "with preceding text", text: "Let me read that file.\n"},
+			{name: "without text", text: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				decoder := &AssistantStreamDecoder{Functions: []string{"read_file"}}
+				payload := assistantStreamPayload(t,
+					assistantMessage("applet-1",
+						assistantModelStep(1, 1, tc.text, assistantActionTool([2]string{"tag", assistantQuestionTool}, [2]string{"questions", string(questions)})),
+					),
+				)
+				var events []Event
+				if err := DecodeAssistantStream(strings.NewReader(payload), decoder, func(event Event) error {
+					events = append(events, event)
+					return nil
+				}); err != nil {
+					t.Fatalf("DecodeAssistantStream failed: %v", err)
+				}
+				if !decoder.malformed || decoder.invalidTool || !decoder.overran || decoder.called {
+					t.Fatalf("unexpected decoder flags: malformed=%v invalidTool=%v overran=%v called=%v", decoder.malformed, decoder.invalidTool, decoder.overran, decoder.called)
+				}
+				var finish string
+				for _, event := range events {
+					if event.Kind == EventFinish {
+						finish = event.FinishReason
+					}
+				}
+				if finish != decodeFinishReason(10) {
+					t.Fatalf("finish reason=%q, want %q", finish, decodeFinishReason(10))
+				}
+			})
+		}
+	})
 }
 
 func TestSendAssistantRecoversMalformedFunctionCallWithinSameApplet(t *testing.T) {
@@ -241,6 +302,50 @@ func TestSendAssistantRecoversMalformedFunctionCallWithoutPriorText(t *testing.T
 		t.Fatalf("expected exact assistantMalformedCallPrompt without partial_reply, got %q", followUpPrompt)
 	}
 	assertRecoveredToolCallEvents(t, events, "", "read_file", `{"path":"config.yaml"}`)
+}
+
+func TestSendAssistantRecoversCallQuestionWithoutFunctionCallsBlock(t *testing.T) {
+	questions, _ := json.Marshal([]map[string]any{{"question": assistantCallQuestion}})
+	transport := &fakeAssistantTransport{
+		streams: []string{
+			assistantStreamPayload(t,
+				assistantMessage("applet-1",
+					assistantModelStep(1, 1, "Let me check that file.\n", assistantActionTool([2]string{"tag", assistantQuestionTool}, [2]string{"questions", string(questions)})),
+				),
+			),
+			assistantStreamPayload(t,
+				assistantMessage("applet-1",
+					assistantModelStep(1, 2, "Let me check ", nil),
+				),
+				assistantMessage("applet-1",
+					assistantModelStep(1, 1, "Let me check that file.\n```function_calls\n[{\"name\": \"read_file\", \"arguments\": {\"path\": \"config.yaml\"}}]\n```\n", nil),
+				),
+			),
+		},
+	}
+
+	events, body := runSendAssistantTest(t, transport, []FunctionDeclaration{{Name: "read_file"}})
+	defer body.Close()
+
+	calls := transport.offlineSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("CodeAssistantOffline calls=%d, want 2", len(calls))
+	}
+	if calls[0].continued || !calls[1].continued || calls[0].applet != calls[1].applet {
+		t.Fatalf("unexpected continuation calls: %+v", calls)
+	}
+	followUpPrompt := calls[1].contents[0].Parts[0].Text
+	if !strings.Contains(followUpPrompt, assistantMalformedCallPrompt) {
+		t.Fatalf("follow-up prompt missing assistantMalformedCallPrompt: %q", followUpPrompt)
+	}
+	if strings.Contains(followUpPrompt, assistantInvalidToolPrompt) {
+		t.Fatalf("follow-up prompt unexpectedly used assistantInvalidToolPrompt: %q", followUpPrompt)
+	}
+	if !strings.Contains(followUpPrompt, "<partial_reply>\nLet me check that file.\n\n</partial_reply>") {
+		t.Fatalf("follow-up prompt missing partial reply tail: %q", followUpPrompt)
+	}
+
+	assertRecoveredToolCallEvents(t, events, "Let me check that file.\n", "read_file", `{"path":"config.yaml"}`)
 }
 
 func TestSendAssistantRecoversForbiddenWorkspaceToolWithinSameApplet(t *testing.T) {
@@ -339,6 +444,74 @@ func TestSendAssistantExhaustedInvalidToolEndsWithMalformedFinish(t *testing.T) 
 	}
 	if len(finishes) != 1 || finishes[0].FinishReason != decodeFinishReason(10) {
 		t.Fatalf("expected 1 final malformed_function_call finish, got %+v", finishes)
+	}
+}
+
+func TestSendAssistantInterruptedThenExhaustedMalformedOrInvalidToolEndsWithMalformedFinish(t *testing.T) {
+	failedStep := assistantModelStep(2, 4, "", nil)
+	failedStep[5] = []any{"internal error"}
+	interruptedTurn := assistantStreamPayload(t,
+		assistantMessage("applet-1",
+			assistantModelStep(1, 2, "Partial reply.\n", nil),
+		),
+		assistantMessage("applet-1",
+			failedStep,
+		),
+	)
+	for _, tc := range []struct {
+		name    string
+		badTurn string
+	}{
+		{
+			name: "malformed function_calls",
+			badTurn: assistantStreamPayload(t,
+				assistantMessage("applet-1",
+					assistantModelStep(1, 1, "Partial reply.\n```function_calls\n[{\"name\": \"read_file\", \"arguments\": {broken}]\n```\n", nil),
+				),
+			),
+		},
+		{
+			name: "forbidden workspace tool",
+			badTurn: assistantStreamPayload(t,
+				assistantMessage("applet-1",
+					assistantModelStep(1, 1, "Partial reply.\n", nil),
+					assistantModelStep(2, 1, "", assistantActionTool([2]string{"tag", "run_command"}, [2]string{"command", "ls"})),
+				),
+			),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			streams := make([]string, regenerations+1)
+			streams[0] = interruptedTurn
+			for index := 1; index < len(streams); index++ {
+				streams[index] = tc.badTurn
+			}
+			transport := &fakeAssistantTransport{streams: streams}
+
+			events, body := runSendAssistantTest(t, transport, []FunctionDeclaration{{Name: "read_file"}})
+			defer body.Close()
+
+			calls := transport.offlineSnapshot()
+			if len(calls) != regenerations+1 {
+				t.Fatalf("CodeAssistantOffline calls=%d, want %d", len(calls), regenerations+1)
+			}
+			var text strings.Builder
+			var finishes []Event
+			for _, event := range events {
+				switch event.Kind {
+				case EventText:
+					text.WriteString(event.Text)
+				case EventFinish:
+					finishes = append(finishes, event)
+				}
+			}
+			if text.String() != "Partial reply.\n" {
+				t.Fatalf("expected partial reply text preserved, got %q", text.String())
+			}
+			if len(finishes) != 1 || finishes[0].FinishReason != decodeFinishReason(10) {
+				t.Fatalf("expected 1 final malformed_function_call finish, got %+v", finishes)
+			}
+		})
 	}
 }
 

@@ -952,7 +952,7 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 		for regenerated := 0; regenerated < regenerations; regenerated++ {
 			emittedText := ""
 			recoverCommitted := false
-			if regenerable(ctx, err, finish, committed) {
+			if (!entry.model.Capabilities["assistant_route"] || err != nil) && regenerable(ctx, err, finish, committed) {
 			} else if committed && !entry.model.Capabilities["assistant_route"] && regenerable(ctx, err, finish, false) {
 				var ok bool
 				if emittedText, ok = committedTextOnly(output); !ok {
@@ -1034,11 +1034,13 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			return
 		}
 		if finish != nil && abnormalGenerationFinish(finish.FinishReason) {
-			if usage == nil {
-				usage = previousUsage
-			}
-			if usage != nil && send(Event{Kind: EventUsage, Usage: usage}) != nil {
-				return
+			if len(output.Parts) > 0 {
+				if usage == nil {
+					usage = previousUsage
+				}
+				if usage != nil && send(Event{Kind: EventUsage, Usage: usage}) != nil {
+					return
+				}
 			}
 			if ctx.Err() == nil {
 				_ = send(Event{Kind: EventError, Err: &AbnormalFinishError{Reason: finish.FinishReason, Message: finish.FinishMessage}})
@@ -1157,10 +1159,26 @@ func newContinuationPrefixStripper(emittedText string) *continuationPrefixStripp
 	if emittedText == "" {
 		return nil
 	}
-	targets := []string{emittedText}
-	if tail := partialReplyTail(emittedText); tail != "" && tail != emittedText {
-		targets = append(targets, tail)
+	tail := partialReplyTail(emittedText)
+	candidates := []string{
+		emittedText,
+		strings.TrimRight(emittedText, " \t\r\n"),
+		tail,
+		strings.TrimRight(tail, " \t\r\n"),
 	}
+	targets := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" || slices.Contains(targets, candidate) {
+			continue
+		}
+		targets = append(targets, candidate)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	slices.SortStableFunc(targets, func(left string, right string) int {
+		return cmp.Compare(len(right), len(left))
+	})
 	return &continuationPrefixStripper{targets: targets, active: true}
 }
 
@@ -1178,15 +1196,23 @@ func (s *continuationPrefixStripper) filter(event Event, emit func(Event) error)
 		return emit(event)
 	}
 	if event.Kind != EventText {
-		if event.Kind == EventUsage {
+		switch event.Kind {
+		case EventUsage, EventReasoning, EventGrounding, EventCitation:
 			return emit(event)
+		case EventThoughtSignature:
+			if s.pending == "" {
+				return emit(event)
+			}
 		}
-		if s.pending == "" && (event.Kind == EventReasoning || event.Kind == EventGrounding || event.Kind == EventCitation) {
-			return emit(event)
-		}
+		sig := s.pendingSig
 		s.pending = ""
 		s.pendingSig = ""
 		s.active = false
+		if sig != "" {
+			if err := emit(Event{Kind: EventThoughtSignature, Part: Part{ThoughtSignature: sig}}); err != nil {
+				return err
+			}
+		}
 		return emit(event)
 	}
 	if event.Transcript != nil {

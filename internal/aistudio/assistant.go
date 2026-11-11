@@ -566,7 +566,7 @@ func (c *Client) sendAssistant(ctx context.Context, request GenerateRequest, ent
 			err = errors.Join(DecodeAssistantStream(follow.Body, decoder, collect), follow.Body.Close())
 		}
 		cleanup.completed.Store(decoder.failed || err == nil && decoder.finished && !decoder.overran)
-		if err == nil && interruption != nil && len(reply) == replied {
+		if err == nil && interruption != nil && len(reply) == replied && !decoder.malformed && !decoder.invalidTool {
 			err = interruption
 		}
 		if err == nil {
@@ -1007,15 +1007,18 @@ func (d *AssistantStreamDecoder) decodeStep(raw json.RawMessage, path string, ev
 	}
 	var events []Event
 	invalidAction := false
+	missingCallQuestion := false
 	if actionRaw := rawAt(step, 9); !isJSONNull(actionRaw) && status == 1 && !d.searched[number] {
 		if err := d.decodeSearch(actionRaw, path+"[9]", evidence); err != nil {
 			return nil, err
 		}
-		if events, err = d.decodeQuestion(actionRaw, path+"[9]", evidence); err != nil {
+		var isQuestion bool
+		if events, isQuestion, err = d.decodeQuestion(actionRaw, path+"[9]", evidence); err != nil {
 			return nil, err
 		}
 		action, _ := rawArray(actionRaw, path+"[9]", evidence)
-		invalidAction = isJSONNull(rawAt(action, 18)) && len(events) == 0
+		invalidAction = !isQuestion && isJSONNull(rawAt(action, 18)) && len(events) == 0
+		missingCallQuestion = isQuestion && len(events) == 0
 		d.searched[number] = true
 	}
 	contentsRaw := rawAt(step, 0)
@@ -1058,6 +1061,9 @@ func (d *AssistantStreamDecoder) decodeStep(raw json.RawMessage, path string, ev
 	}
 	if invalidAction && len(d.Functions) > 0 && !d.called {
 		d.invalidTool = true
+		d.overran = true
+	} else if missingCallQuestion && len(d.Functions) > 0 && !d.called && !d.block {
+		d.malformed = true
 		d.overran = true
 	}
 	return events, nil
@@ -1332,47 +1338,47 @@ func validJSONEscape(rest string) bool {
 }
 
 // decodeQuestion 解码 ask_question 工具动作 field 22 [标题, null, 说明, [[参数名, 值]...]]：没有输出函数调用时把各问题与选项输出为正文，交回函数调用的提问不输出
-func (d *AssistantStreamDecoder) decodeQuestion(raw json.RawMessage, path string, evidence json.RawMessage) ([]Event, error) {
+func (d *AssistantStreamDecoder) decodeQuestion(raw json.RawMessage, path string, evidence json.RawMessage) ([]Event, bool, error) {
 	action, err := rawArray(raw, path, evidence)
 	if err != nil {
-		return nil, withMethod(err, assistantStreamMethod)
+		return nil, false, withMethod(err, assistantStreamMethod)
 	}
 	toolRaw := rawAt(action, 21)
 	if isJSONNull(toolRaw) || d.called {
-		return nil, nil
+		return nil, false, nil
 	}
 	tool, err := rawArray(toolRaw, path+"[21]", evidence)
 	if err != nil {
-		return nil, withMethod(err, assistantStreamMethod)
+		return nil, false, withMethod(err, assistantStreamMethod)
 	}
 	pairs, err := rawArray(rawAt(tool, 3), path+"[21][3]", evidence)
 	if err != nil {
-		return nil, withMethod(err, assistantStreamMethod)
+		return nil, false, withMethod(err, assistantStreamMethod)
 	}
 	arguments := map[string]string{}
 	for index, pairRaw := range pairs {
 		pairPath := fmt.Sprintf("%s[21][3][%d]", path, index)
 		pair, err := rawArray(pairRaw, pairPath, evidence)
 		if err != nil {
-			return nil, withMethod(err, assistantStreamMethod)
+			return nil, false, withMethod(err, assistantStreamMethod)
 		}
 		name, err := rawString(rawAt(pair, 0), pairPath+"[0]", evidence)
 		if err != nil {
-			return nil, withMethod(err, assistantStreamMethod)
+			return nil, false, withMethod(err, assistantStreamMethod)
 		}
 		if arguments[name], err = rawString(rawAt(pair, 1), pairPath+"[1]", evidence); err != nil {
-			return nil, withMethod(err, assistantStreamMethod)
+			return nil, false, withMethod(err, assistantStreamMethod)
 		}
 	}
 	if arguments["tag"] != assistantQuestionTool {
-		return nil, nil
+		return nil, false, nil
 	}
 	var questions []struct {
 		Question string   `json:"question"`
 		Options  []string `json:"options"`
 	}
 	if err := json.Unmarshal([]byte(arguments["questions"]), &questions); err != nil {
-		return nil, &ProtocolEvidenceError{Method: assistantStreamMethod, Path: path + "[21][3]", Detail: "ask_question 的 questions 不是问题列表: " + err.Error(), Raw: cloneRaw(evidence)}
+		return nil, true, &ProtocolEvidenceError{Method: assistantStreamMethod, Path: path + "[21][3]", Detail: "ask_question 的 questions 不是问题列表: " + err.Error(), Raw: cloneRaw(evidence)}
 	}
 	var text strings.Builder
 	for _, question := range questions {
@@ -1388,10 +1394,10 @@ func (d *AssistantStreamDecoder) decodeQuestion(raw json.RawMessage, path string
 		}
 	}
 	if text.Len() == 0 {
-		return nil, nil
+		return nil, true, nil
 	}
 	d.wroteText = true
-	return []Event{{Kind: EventText, Text: text.String()}}, nil
+	return []Event{{Kind: EventText, Text: text.String()}}, true, nil
 }
 
 // decodeSearch 把完成的 search_web 工具动作（field 19：查询、域名、摘要、[标题, 链接] 列表）并入搜索来源，查询与摘要记入 searches

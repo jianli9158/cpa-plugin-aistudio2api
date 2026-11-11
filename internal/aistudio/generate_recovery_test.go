@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -276,6 +278,168 @@ func TestContinuationPrefixStripper(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(emitted) != 1 || emitted[0].Text != "Hello there" {
+			t.Fatalf("emitted = %+v", emitted)
+		}
+	})
+
+	t.Run("interleaved grounding, reasoning, and citation while pending", func(t *testing.T) {
+		stripper := newContinuationPrefixStripper("Hello world")
+		var emitted []Event
+		emit := func(event Event) error {
+			emitted = append(emitted, event)
+			return nil
+		}
+		for _, event := range []Event{
+			{Kind: EventText, Part: Part{Text: "Hello ", ThoughtSignature: "sig-pending"}},
+			{Kind: EventGrounding, Grounding: &GroundingMetadata{WebSearchQueries: []string{"tokyo weather"}}},
+			{Kind: EventReasoning, Part: Part{Text: "thinking...", Thought: true}},
+			{Kind: EventCitation, Citation: &Citation{URL: "https://example.com"}},
+			{Kind: EventText, Part: Part{Text: "world! Next"}},
+			{Kind: EventText, Part: Part{Text: " chunk"}},
+		} {
+			if err := stripper.filter(event, emit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(emitted) != 5 {
+			t.Fatalf("emitted len = %d, want 5: %+v", len(emitted), emitted)
+		}
+		if emitted[0].Kind != EventGrounding || emitted[1].Kind != EventReasoning || emitted[2].Kind != EventCitation {
+			t.Fatalf("unexpected interleaved metadata events: %+v", emitted[:3])
+		}
+		if emitted[3].Kind != EventText || emitted[3].Text != "! Next" || emitted[3].ThoughtSignature != "sig-pending" {
+			t.Fatalf("emitted[3] = %+v", emitted[3])
+		}
+		if emitted[4].Kind != EventText || emitted[4].Text != " chunk" {
+			t.Fatalf("emitted[4] = %+v", emitted[4])
+		}
+	})
+
+	t.Run("thought signature before text keeps stripper active", func(t *testing.T) {
+		stripper := newContinuationPrefixStripper("Hello world")
+		var emitted []Event
+		emit := func(event Event) error {
+			emitted = append(emitted, event)
+			return nil
+		}
+		for _, event := range []Event{
+			{Kind: EventThoughtSignature, Part: Part{ThoughtSignature: "sig-pre"}},
+			{Kind: EventText, Part: Part{Text: "Hello world!"}},
+		} {
+			if err := stripper.filter(event, emit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(emitted) != 2 {
+			t.Fatalf("emitted len = %d, want 2: %+v", len(emitted), emitted)
+		}
+		if emitted[0].Kind != EventThoughtSignature || emitted[0].ThoughtSignature != "sig-pre" {
+			t.Fatalf("emitted[0] = %+v", emitted[0])
+		}
+		if emitted[1].Kind != EventText || emitted[1].Text != "!" {
+			t.Fatalf("emitted[1] = %+v", emitted[1])
+		}
+	})
+
+	t.Run("pending signature flushed on tool call", func(t *testing.T) {
+		stripper := newContinuationPrefixStripper("Hello world")
+		var emitted []Event
+		emit := func(event Event) error {
+			emitted = append(emitted, event)
+			return nil
+		}
+		for _, event := range []Event{
+			{Kind: EventText, Part: Part{Text: "Hello ", ThoughtSignature: "sig-pending"}},
+			{Kind: EventToolCall, Part: Part{FunctionCall: &FunctionCall{Name: "get_weather", Arguments: json.RawMessage(`{}`)}}},
+			{Kind: EventText, Part: Part{Text: "Hello world"}},
+		} {
+			if err := stripper.filter(event, emit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(emitted) != 3 {
+			t.Fatalf("emitted len = %d, want 3: %+v", len(emitted), emitted)
+		}
+		if emitted[0].Kind != EventThoughtSignature || emitted[0].ThoughtSignature != "sig-pending" {
+			t.Fatalf("emitted[0] = %+v", emitted[0])
+		}
+		if emitted[1].Kind != EventToolCall || emitted[1].FunctionCall == nil || emitted[1].FunctionCall.Name != "get_weather" {
+			t.Fatalf("emitted[1] = %+v", emitted[1])
+		}
+		if emitted[2].Kind != EventText || emitted[2].Text != "Hello world" {
+			t.Fatalf("emitted[2] = %+v", emitted[2])
+		}
+	})
+
+	t.Run("pending signature flushed before thought signature", func(t *testing.T) {
+		stripper := newContinuationPrefixStripper("Hello world")
+		var emitted []Event
+		emit := func(event Event) error {
+			emitted = append(emitted, event)
+			return nil
+		}
+		for _, event := range []Event{
+			{Kind: EventText, Part: Part{Text: "Hello ", ThoughtSignature: "sig-pending"}},
+			{Kind: EventThoughtSignature, Part: Part{ThoughtSignature: "sig-incoming"}},
+			{Kind: EventText, Part: Part{Text: "Hello world"}},
+		} {
+			if err := stripper.filter(event, emit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(emitted) != 3 {
+			t.Fatalf("emitted len = %d, want 3: %+v", len(emitted), emitted)
+		}
+		if emitted[0].Kind != EventThoughtSignature || emitted[0].ThoughtSignature != "sig-pending" {
+			t.Fatalf("emitted[0] = %+v", emitted[0])
+		}
+		if emitted[1].Kind != EventThoughtSignature || emitted[1].ThoughtSignature != "sig-incoming" {
+			t.Fatalf("emitted[1] = %+v", emitted[1])
+		}
+		if emitted[2].Kind != EventText || emitted[2].Text != "Hello world" {
+			t.Fatalf("emitted[2] = %+v", emitted[2])
+		}
+	})
+
+	t.Run("trailing whitespace trimmed short reply", func(t *testing.T) {
+		stripper := newContinuationPrefixStripper("Hello world  \n")
+		var emitted []Event
+		emit := func(event Event) error {
+			emitted = append(emitted, event)
+			return nil
+		}
+		if err := stripper.filter(Event{Kind: EventText, Part: Part{Text: "Hello world"}}, emit); err != nil {
+			t.Fatal(err)
+		}
+		if len(emitted) != 0 {
+			t.Fatalf("expected pending buffer waiting for trailing whitespace, got %+v", emitted)
+		}
+		if err := stripper.filter(Event{Kind: EventText, Part: Part{Text: "Next step"}}, emit); err != nil {
+			t.Fatal(err)
+		}
+		if len(emitted) != 1 || emitted[0].Kind != EventText || emitted[0].Text != "Next step" {
+			t.Fatalf("emitted = %+v", emitted)
+		}
+	})
+
+	t.Run("trailing whitespace trimmed long tail", func(t *testing.T) {
+		tail := strings.Repeat("b", assistantPartialReplyRunes-3) + "  \n"
+		stripper := newContinuationPrefixStripper("HEAD-" + tail)
+		var emitted []Event
+		emit := func(event Event) error {
+			emitted = append(emitted, event)
+			return nil
+		}
+		if err := stripper.filter(Event{Kind: EventText, Part: Part{Text: strings.TrimRight(tail, " \t\r\n")}}, emit); err != nil {
+			t.Fatal(err)
+		}
+		if len(emitted) != 0 {
+			t.Fatalf("expected pending buffer waiting for untrimmed tail, got %+v", emitted)
+		}
+		if err := stripper.filter(Event{Kind: EventText, Part: Part{Text: " continued"}}, emit); err != nil {
+			t.Fatal(err)
+		}
+		if len(emitted) != 1 || emitted[0].Kind != EventText || emitted[0].Text != " continued" {
 			t.Fatalf("emitted = %+v", emitted)
 		}
 	})
@@ -660,5 +824,187 @@ func TestGenerateCommittedNonTextDoesNotRecover(t *testing.T) {
 	}
 	if abnormal == nil || abnormal.Reason != "malformed_function_call" || abnormal.Message != "second call broken" {
 		t.Fatalf("abnormal = %+v", abnormal)
+	}
+}
+
+// TestGenerateZeroOutputMalformedEmitsErrorFirstWithoutUsage 验证零输出遇到 malformed_function_call 时直接以 EventError 作为首个事件而不先发 EventUsage
+func TestGenerateZeroOutputMalformedEmitsErrorFirstWithoutUsage(t *testing.T) {
+	malformedCode := int64(10)
+	failedFrame := playgroundStreamBody(t,
+		playgroundStreamFrame(nil, &malformedCode, "empty malformed", &Usage{InputTokens: 10, OutputTokens: 3, TotalTokens: 13}),
+	)
+
+	responses := make([]string, regenerations+1)
+	for index := range responses {
+		responses[index] = failedFrame
+	}
+	client, transport := newRecoveryTestClient("gemini-test", responses...)
+
+	stream, err := client.Generate(context.Background(), GenerateRequest{
+		ID:        "req-zero-output-malformed",
+		AccountID: "acc@example.com",
+		Model:     "gemini-test",
+		Contents:  []Content{{Role: RoleUser, Parts: []Part{{Text: "Call tool"}}}},
+		Tools: Tools{
+			Functions:  []FunctionDeclaration{{Name: "ping", Parameters: json.RawMessage(`{"type":"object"}`)}},
+			ToolConfig: ToolConfig{Mode: "required"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	events := collectRecoveryEvents(stream)
+
+	if len(transport.bodies) != regenerations+1 {
+		t.Fatalf("attempts = %d, want %d", len(transport.bodies), regenerations+1)
+	}
+	if len(events) != 1 || events[0].Kind != EventError {
+		t.Fatalf("events = %+v, want single EventError without EventUsage", events)
+	}
+	var abnormal *AbnormalFinishError
+	if !errors.As(events[0].Err, &abnormal) {
+		t.Fatalf("expected *AbnormalFinishError, got %T (%v)", events[0].Err, events[0].Err)
+	}
+	if abnormal.Reason != "malformed_function_call" || abnormal.Message != "empty malformed" {
+		t.Fatalf("abnormal = %+v", abnormal)
+	}
+}
+
+type recoveryAssistantTransport struct {
+	mu           sync.Mutex
+	createCalls  int
+	offlineCalls int
+	streamCalls  int
+	streams      []string
+}
+
+func (t *recoveryAssistantTransport) Do(_ context.Context, rpc RPCRequest) (*RPCResponse, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	body := `[]`
+	switch rpc.Method {
+	case "CreateApplet":
+		t.createCalls++
+		body = `["applet-1"]`
+	case assistantStreamMethod:
+		if t.streamCalls < len(t.streams) {
+			body = t.streams[t.streamCalls]
+		} else {
+			body = `[[],[0]]`
+		}
+		t.streamCalls++
+	}
+	return &RPCResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{JSONProtobufContentType}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func (t *recoveryAssistantTransport) DoProtected(_ context.Context, _ GenerateRequest, _ RPCRequest) (*RPCResponse, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.offlineCalls++
+	return &RPCResponse{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{JSONProtobufContentType}},
+		Body:       io.NopCloser(strings.NewReader(fmt.Sprintf(`["gen-%d","applet-1"]`, t.offlineCalls))),
+	}, nil
+}
+
+// TestGenerateAssistantRouteMalformedDoesNotAmplifyOuterRetries 验证 assistant_route 零输出返回 malformed_function_call 时外层 Generate 不重复调用 sendAssistant，仅发 1 次 CreateApplet 与 1+regenerations 次 CodeAssistantOffline，并直接以 EventError 结束
+func TestGenerateAssistantRouteMalformedDoesNotAmplifyOuterRetries(t *testing.T) {
+	step := make([]any, 16)
+	step[0] = []any{[]any{[]any{[]any{nil, "```function_calls\n[{\"name\":\"get_weather\",\"arguments\":{broken}]\n```"}}, "model"}}
+	step[11] = int64(1)
+	step[12] = int64(1)
+	step[15] = []any{int64(10), int64(4), int64(0)}
+	message := []any{nil, nil, [][]any{step}, "applet-1"}
+	encoded, err := json.Marshal([]any{[][]any{message}, []any{int64(0)}})
+	if err != nil {
+		t.Fatalf("marshal assistant stream: %v", err)
+	}
+	malformedStream := string(encoded)
+
+	streams := make([]string, (regenerations+1)*2)
+	for index := range streams {
+		streams[index] = malformedStream
+	}
+	transport := &recoveryAssistantTransport{streams: streams}
+
+	baseModel := Model{
+		ID:           "gemini-2.5-pro",
+		Name:         "Gemini 2.5 Pro",
+		Methods:      []string{"generateContent"},
+		Capabilities: map[string]bool{"chat_model": true, "code_assistant": true},
+	}
+	entry := assistantModelEntry(modelEntry{
+		model: baseModel,
+		defaults: GenerationDefaults{
+			MaxOutputTokens: 8192,
+			Thinking:        true,
+			ThinkingLevel:   true,
+			ThinkingLevels:  []int64{1, 2, 3, 4},
+		},
+	})
+	account := &Account{
+		ID:                    "acc@example.com",
+		Config:                AccountConfig{Enabled: true},
+		State:                 AccountReady,
+		Models:                []Model{baseModel, entry.model},
+		modelAccessGeneration: 1,
+	}
+	pool := NewAccountPool([]*Account{account}, 1)
+	lease, ok, err := pool.TryAcquireFor(context.Background(), AccountSelection{ModelID: entry.model.ID, Method: "generateContent"})
+	if err != nil || !ok {
+		t.Fatalf("TryAcquireFor ok=%v err=%v", ok, err)
+	}
+	defer func() { _ = lease.Release() }()
+
+	client := NewClient(ClientOptions{Transport: transport, Protected: transport})
+	client.setModelCatalog(account.ID, modelCatalog{
+		models:  []Model{baseModel, entry.model},
+		entries: map[string]modelEntry{entry.model.ID: entry},
+	})
+
+	ctx := ContextWithAccountLease(context.Background(), lease)
+	stream, err := client.Generate(ctx, GenerateRequest{
+		ID:        "req-assistant-malformed",
+		AccountID: account.ID,
+		Model:     entry.model.ID,
+		Contents:  []Content{{Role: RoleUser, Parts: []Part{{Text: "Check weather"}}}},
+		Tools: Tools{
+			Functions: []FunctionDeclaration{{
+				Name:       "get_weather",
+				Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	events := collectRecoveryEvents(stream)
+
+	transport.mu.Lock()
+	createCalls := transport.createCalls
+	offlineCalls := transport.offlineCalls
+	streamCalls := transport.streamCalls
+	transport.mu.Unlock()
+
+	if createCalls != 1 {
+		t.Fatalf("CreateApplet calls = %d, want 1", createCalls)
+	}
+	if offlineCalls != 1+regenerations {
+		t.Fatalf("CodeAssistantOffline calls = %d, want %d", offlineCalls, 1+regenerations)
+	}
+	if streamCalls != 1+regenerations {
+		t.Fatalf("StreamCodeAssistantOfflineGeneration calls = %d, want %d", streamCalls, 1+regenerations)
+	}
+	if len(events) != 1 || events[0].Kind != EventError {
+		t.Fatalf("events = %+v, want single EventError without EventUsage", events)
+	}
+	var abnormal *AbnormalFinishError
+	if !errors.As(events[0].Err, &abnormal) || abnormal.Reason != "malformed_function_call" {
+		t.Fatalf("events[0].Err = %T (%v), want *AbnormalFinishError(malformed_function_call)", events[0].Err, events[0].Err)
 	}
 }
