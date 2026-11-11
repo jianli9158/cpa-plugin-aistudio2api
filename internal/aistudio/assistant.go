@@ -430,6 +430,8 @@ func (c *Client) sendAssistant(ctx context.Context, request GenerateRequest, ent
 		var finish *Event
 		stripPrefix := ""
 		trimmedPrefix := ""
+		tailPrefix := ""
+		trimmedTail := ""
 		var pendingPrefix strings.Builder
 		emitText := func(text string) error {
 			if text == "" {
@@ -443,15 +445,24 @@ func (c *Client) sendAssistant(ctx context.Context, request GenerateRequest, ent
 			if pendingPrefix.Len() == 0 {
 				stripPrefix = ""
 				trimmedPrefix = ""
+				tailPrefix = ""
+				trimmedTail = ""
 				return nil
 			}
 			buffered := pendingPrefix.String()
 			pendingPrefix.Reset()
 			target := stripPrefix
 			trimmed := trimmedPrefix
+			tail := tailPrefix
+			trimmedT := trimmedTail
 			stripPrefix = ""
 			trimmedPrefix = ""
-			if dropExact && (strings.HasPrefix(target, buffered) || trimmed != "" && strings.TrimRight(buffered, " \t\r\n") == trimmed) {
+			tailPrefix = ""
+			trimmedTail = ""
+			if dropExact && (strings.HasPrefix(target, buffered) ||
+				(trimmed != "" && strings.TrimRight(buffered, " \t\r\n") == trimmed) ||
+				(tail != "" && strings.HasPrefix(tail, buffered)) ||
+				(trimmedT != "" && strings.TrimRight(buffered, " \t\r\n") == trimmedT)) {
 				return nil
 			}
 			return emitText(buffered)
@@ -459,19 +470,21 @@ func (c *Client) sendAssistant(ctx context.Context, request GenerateRequest, ent
 		collect := func(event Event) error {
 			switch event.Kind {
 			case EventText:
-				if stripPrefix == "" {
+				if stripPrefix == "" && tailPrefix == "" {
 					return emitText(event.Text)
 				}
 				pendingPrefix.WriteString(event.Text)
 				combined := pendingPrefix.String()
-				if strings.HasPrefix(combined, stripPrefix) {
+				if stripPrefix != "" && strings.HasPrefix(combined, stripPrefix) {
 					rest := combined[len(stripPrefix):]
 					pendingPrefix.Reset()
 					stripPrefix = ""
 					trimmedPrefix = ""
+					tailPrefix = ""
+					trimmedTail = ""
 					return emitText(rest)
 				}
-				if strings.HasPrefix(stripPrefix, combined) {
+				if stripPrefix != "" && strings.HasPrefix(stripPrefix, combined) {
 					return nil
 				}
 				if trimmedPrefix != "" && stripPrefix != trimmedPrefix && strings.HasPrefix(combined, trimmedPrefix) {
@@ -483,7 +496,37 @@ func (c *Client) sendAssistant(ctx context.Context, request GenerateRequest, ent
 						pendingPrefix.Reset()
 						stripPrefix = ""
 						trimmedPrefix = ""
+						tailPrefix = ""
+						trimmedTail = ""
 						return emitText(strings.TrimLeft(rest, " \t\r\n"))
+					}
+				}
+				if tailPrefix != "" {
+					if strings.HasPrefix(combined, tailPrefix) {
+						rest := combined[len(tailPrefix):]
+						pendingPrefix.Reset()
+						stripPrefix = ""
+						trimmedPrefix = ""
+						tailPrefix = ""
+						trimmedTail = ""
+						return emitText(rest)
+					}
+					if strings.HasPrefix(tailPrefix, combined) {
+						return nil
+					}
+					if trimmedTail != "" && tailPrefix != trimmedTail && strings.HasPrefix(combined, trimmedTail) {
+						rest := combined[len(trimmedTail):]
+						if strings.TrimLeft(rest, " \t\r\n") == "" {
+							return nil
+						}
+						if rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\r' || rest[0] == '\n' {
+							pendingPrefix.Reset()
+							stripPrefix = ""
+							trimmedPrefix = ""
+							tailPrefix = ""
+							trimmedTail = ""
+							return emitText(strings.TrimLeft(rest, " \t\r\n"))
+						}
 					}
 				}
 				return flushPrefix(false)
@@ -553,6 +596,12 @@ func (c *Client) sendAssistant(ctx context.Context, request GenerateRequest, ent
 			pendingPrefix.Reset()
 			stripPrefix = answer.String()
 			trimmedPrefix = strings.TrimRight(stripPrefix, " \t\r\n")
+			tailPrefix = ""
+			trimmedTail = ""
+			if tail := assistantPartialTail(stripPrefix); tail != "" && tail != stripPrefix {
+				tailPrefix = tail
+				trimmedTail = strings.TrimRight(tail, " \t\r\n")
+			}
 			replied = len(reply)
 			searches = append(searches, decoder.searches...)
 			followUp := request
@@ -1009,14 +1058,14 @@ func (d *AssistantStreamDecoder) decodeStep(raw json.RawMessage, path string, ev
 	invalidAction := false
 	missingCallQuestion := false
 	if actionRaw := rawAt(step, 9); !isJSONNull(actionRaw) && status == 1 && !d.searched[number] {
-		if err := d.decodeSearch(actionRaw, path+"[9]", evidence); err != nil {
+		var action []json.RawMessage
+		if action, err = d.decodeSearch(actionRaw, path+"[9]", evidence); err != nil {
 			return nil, err
 		}
 		var isQuestion bool
 		if events, isQuestion, err = d.decodeQuestion(actionRaw, path+"[9]", evidence); err != nil {
 			return nil, err
 		}
-		action, _ := rawArray(actionRaw, path+"[9]", evidence)
 		invalidAction = !isQuestion && isJSONNull(rawAt(action, 18)) && len(events) == 0
 		missingCallQuestion = isQuestion && len(events) == 0
 		d.searched[number] = true
@@ -1401,22 +1450,22 @@ func (d *AssistantStreamDecoder) decodeQuestion(raw json.RawMessage, path string
 }
 
 // decodeSearch 把完成的 search_web 工具动作（field 19：查询、域名、摘要、[标题, 链接] 列表）并入搜索来源，查询与摘要记入 searches
-func (d *AssistantStreamDecoder) decodeSearch(raw json.RawMessage, path string, evidence json.RawMessage) error {
+func (d *AssistantStreamDecoder) decodeSearch(raw json.RawMessage, path string, evidence json.RawMessage) ([]json.RawMessage, error) {
 	action, err := rawArray(raw, path, evidence)
 	if err != nil {
-		return withMethod(err, assistantStreamMethod)
+		return nil, withMethod(err, assistantStreamMethod)
 	}
 	searchRaw := rawAt(action, 18)
 	if isJSONNull(searchRaw) {
-		return nil
+		return action, nil
 	}
 	search, err := rawArray(searchRaw, path+"[18]", evidence)
 	if err != nil {
-		return withMethod(err, assistantStreamMethod)
+		return nil, withMethod(err, assistantStreamMethod)
 	}
 	query, err := rawString(rawAt(search, 0), path+"[18][0]", evidence)
 	if err != nil {
-		return withMethod(err, assistantStreamMethod)
+		return nil, withMethod(err, assistantStreamMethod)
 	}
 	if d.grounding == nil {
 		d.grounding = &GroundingMetadata{}
@@ -1425,33 +1474,33 @@ func (d *AssistantStreamDecoder) decodeSearch(raw json.RawMessage, path string, 
 	if summaryRaw := rawAt(search, 2); !isJSONNull(summaryRaw) {
 		summary, err := rawString(summaryRaw, path+"[18][2]", evidence)
 		if err != nil {
-			return withMethod(err, assistantStreamMethod)
+			return nil, withMethod(err, assistantStreamMethod)
 		}
 		d.searches = append(d.searches, fmt.Sprintf(assistantSearchTranscript, query, summary))
 	}
 	if resultsRaw := rawAt(search, 3); !isJSONNull(resultsRaw) {
 		results, err := rawArray(resultsRaw, path+"[18][3]", evidence)
 		if err != nil {
-			return withMethod(err, assistantStreamMethod)
+			return nil, withMethod(err, assistantStreamMethod)
 		}
 		for index, resultRaw := range results {
 			resultPath := fmt.Sprintf("%s[18][3][%d]", path, index)
 			result, err := rawArray(resultRaw, resultPath, evidence)
 			if err != nil {
-				return withMethod(err, assistantStreamMethod)
+				return nil, withMethod(err, assistantStreamMethod)
 			}
 			title, err := rawString(rawAt(result, 0), resultPath+"[0]", evidence)
 			if err != nil {
-				return withMethod(err, assistantStreamMethod)
+				return nil, withMethod(err, assistantStreamMethod)
 			}
 			uri, err := rawString(rawAt(result, 1), resultPath+"[1]", evidence)
 			if err != nil {
-				return withMethod(err, assistantStreamMethod)
+				return nil, withMethod(err, assistantStreamMethod)
 			}
 			d.grounding.Chunks = append(d.grounding.Chunks, GroundingChunk{Source: "web", URI: uri, Title: title})
 		}
 	}
-	return nil
+	return action, nil
 }
 
 // recorded 返回记录的搜索来源与各步骤用量之和

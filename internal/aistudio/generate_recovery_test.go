@@ -1139,3 +1139,87 @@ func TestGenerateHiddenReasoningZeroOutputMalformedEmitsErrorFirstWithoutUsage(t
 		}
 	})
 }
+
+// TestGenerateZeroOutputGroundingMalformedEmitsErrorFirstWithoutUsageOrGrounding 验证未提交时缓存的来源在遇到异常终止且重试耗尽时丢弃，首个事件直接为 EventError(*AbnormalFinishError)，不先发 EventGrounding 或 EventUsage
+func TestGenerateZeroOutputGroundingMalformedEmitsErrorFirstWithoutUsageOrGrounding(t *testing.T) {
+	malformedCode := int64(10)
+	candidate := make([]any, 8)
+	candidate[0] = []any{nil, "model"}
+	candidate[1] = malformedCode
+	candidate[3] = "malformed search result"
+	candidate[7] = []any{[]any{"<p>Search Results</p>"}}
+	frame := make([]any, 3)
+	frame[0] = []any{candidate}
+	frame[2] = []any{10, 2, 12}
+	failedFrame := playgroundStreamBody(t, frame)
+
+	responses := make([]string, regenerations+1)
+	for index := range responses {
+		responses[index] = failedFrame
+	}
+	client, transport := newRecoveryTestClient("gemini-test", responses...)
+
+	stream, err := client.Generate(context.Background(), GenerateRequest{
+		ID:        "req-zero-grounding-malformed",
+		AccountID: "acc@example.com",
+		Model:     "gemini-test",
+		Contents:  []Content{{Role: RoleUser, Parts: []Part{{Text: "Search and call tool"}}}},
+		Tools: Tools{
+			Functions:  []FunctionDeclaration{{Name: "ping", Parameters: json.RawMessage(`{"type":"object"}`)}},
+			ToolConfig: ToolConfig{Mode: "required"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	events := collectRecoveryEvents(stream)
+
+	if len(transport.bodies) != regenerations+1 {
+		t.Fatalf("attempts = %d, want %d", len(transport.bodies), regenerations+1)
+	}
+	if len(events) != 1 || events[0].Kind != EventError {
+		t.Fatalf("events = %+v, want single EventError without prior EventGrounding or EventUsage", events)
+	}
+	var abnormal *AbnormalFinishError
+	if !errors.As(events[0].Err, &abnormal) {
+		t.Fatalf("expected *AbnormalFinishError, got %T (%v)", events[0].Err, events[0].Err)
+	}
+	if abnormal.Reason != "malformed_function_call" || abnormal.Message != "malformed search result" {
+		t.Fatalf("abnormal = %+v", abnormal)
+	}
+}
+
+// TestGenerateZeroOutputContentPolicyEmitsErrorFirstWithoutUsage 验证零输出遇到内容策略类结束原因时直接以 EventError(*ContentPolicyError) 结束，不先发 EventUsage
+func TestGenerateZeroOutputContentPolicyEmitsErrorFirstWithoutUsage(t *testing.T) {
+	safetyCode := int64(3)
+	failedFrame := playgroundStreamBody(t,
+		playgroundStreamFrame(nil, &safetyCode, "blocked by safety policy", &Usage{InputTokens: 15, OutputTokens: 0, TotalTokens: 15}),
+	)
+
+	client, transport := newRecoveryTestClient("gemini-test", failedFrame)
+
+	stream, err := client.Generate(context.Background(), GenerateRequest{
+		ID:        "req-zero-safety",
+		AccountID: "acc@example.com",
+		Model:     "gemini-test",
+		Contents:  []Content{{Role: RoleUser, Parts: []Part{{Text: "Harmful prompt"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	events := collectRecoveryEvents(stream)
+
+	if len(transport.bodies) != 1 {
+		t.Fatalf("attempts = %d, want 1", len(transport.bodies))
+	}
+	if len(events) != 1 || events[0].Kind != EventError {
+		t.Fatalf("events = %+v, want single EventError without EventUsage", events)
+	}
+	var policyErr *ContentPolicyError
+	if !errors.As(events[0].Err, &policyErr) {
+		t.Fatalf("expected *ContentPolicyError, got %T (%v)", events[0].Err, events[0].Err)
+	}
+	if policyErr.Reason != "safety" || policyErr.Message != "blocked by safety policy" {
+		t.Fatalf("policyErr = %+v", policyErr)
+	}
+}

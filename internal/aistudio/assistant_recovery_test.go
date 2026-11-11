@@ -274,6 +274,55 @@ func TestSendAssistantRecoversMalformedFunctionCallWithinSameApplet(t *testing.T
 	assertRecoveredToolCallEvents(t, events, "Let me read that file.\n", "read_file", `{"path":"config.yaml"}`)
 }
 
+func TestSendAssistantLongReplyTailPrefixStrippingExceeding20kRunes(t *testing.T) {
+	head := strings.Repeat("A", 5000)
+	tail := strings.Repeat("B", 20000)
+	fullText := head + tail
+	transport := &fakeAssistantTransport{
+		streams: []string{
+			assistantStreamPayload(t,
+				assistantMessage("applet-1",
+					assistantModelStep(1, 1, fullText+"```function_calls\n[{\"name\": \"read_file\", \"arguments\": {broken}]\n```\n", nil),
+				),
+			),
+			assistantStreamPayload(t,
+				assistantMessage("applet-1",
+					assistantModelStep(1, 2, tail[:100], nil),
+				),
+				assistantMessage("applet-1",
+					assistantModelStep(1, 1, tail+"\nNow reading the file.\n```function_calls\n[{\"name\": \"read_file\", \"arguments\": {\"path\": \"config.yaml\"}}]\n```\n", nil),
+				),
+			),
+		},
+	}
+
+	events, body := runSendAssistantTest(t, transport, []FunctionDeclaration{{Name: "read_file"}})
+	defer body.Close()
+
+	if transport.createCount() != 1 {
+		t.Fatalf("CreateApplet calls=%d, want 1", transport.createCount())
+	}
+	calls := transport.offlineSnapshot()
+	if len(calls) != 2 {
+		t.Fatalf("CodeAssistantOffline calls=%d, want 2", len(calls))
+	}
+	if calls[0].continued || !calls[1].continued || calls[0].applet != calls[1].applet {
+		t.Fatalf("unexpected continuation calls: %+v", calls)
+	}
+	followUpPrompt := calls[1].contents[0].Parts[0].Text
+	if !strings.Contains(followUpPrompt, assistantMalformedCallPrompt) {
+		t.Fatalf("follow-up prompt missing assistantMalformedCallPrompt: %q", followUpPrompt)
+	}
+	if !strings.Contains(followUpPrompt, "<partial_reply>\n"+tail+"\n</partial_reply>") {
+		t.Fatalf("follow-up prompt missing partial reply tail: %q", followUpPrompt)
+	}
+	if strings.Contains(followUpPrompt, head) {
+		t.Fatalf("follow-up prompt unexpectedly contains truncated head")
+	}
+
+	assertRecoveredToolCallEvents(t, events, fullText+"\nNow reading the file.\n", "read_file", `{"path":"config.yaml"}`)
+}
+
 func TestSendAssistantRecoversMalformedFunctionCallWithoutPriorText(t *testing.T) {
 	transport := &fakeAssistantTransport{
 		streams: []string{
