@@ -1008,3 +1008,134 @@ func TestGenerateAssistantRouteMalformedDoesNotAmplifyOuterRetries(t *testing.T)
 		t.Fatalf("events[0].Err = %T (%v), want *AbnormalFinishError(malformed_function_call)", events[0].Err, events[0].Err)
 	}
 }
+
+// TestGenerateHiddenReasoningZeroOutputMalformedEmitsErrorFirstWithoutUsage 验证 HideThinking 开启且上游仅输出无签名思考后以 malformed_function_call 耗尽重试时，直接以 EventError 作为首个事件而不先发 EventUsage
+func TestGenerateHiddenReasoningZeroOutputMalformedEmitsErrorFirstWithoutUsage(t *testing.T) {
+	t.Run("playground", func(t *testing.T) {
+		malformedCode := int64(10)
+		failedFrame := playgroundStreamBody(t,
+			playgroundStreamFrame([][]any{playgroundThoughtWirePart("hidden reasoning")}, nil, "", nil),
+			playgroundStreamFrame(nil, &malformedCode, "hidden reasoning malformed", &Usage{InputTokens: 10, OutputTokens: 4, TotalTokens: 14}),
+		)
+
+		responses := make([]string, regenerations+1)
+		for index := range responses {
+			responses[index] = failedFrame
+		}
+		client, transport := newRecoveryTestClient("gemini-test", responses...)
+
+		stream, err := client.Generate(context.Background(), GenerateRequest{
+			ID:        "req-hidden-reasoning-playground-malformed",
+			AccountID: "acc@example.com",
+			Model:     "gemini-test",
+			Config:    GenerationConfig{HideThinking: true},
+			Contents:  []Content{{Role: RoleUser, Parts: []Part{{Text: "Call tool"}}}},
+			Tools: Tools{
+				Functions:  []FunctionDeclaration{{Name: "ping", Parameters: json.RawMessage(`{"type":"object"}`)}},
+				ToolConfig: ToolConfig{Mode: "required"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Generate failed: %v", err)
+		}
+		events := collectRecoveryEvents(stream)
+
+		if len(transport.bodies) != regenerations+1 {
+			t.Fatalf("attempts = %d, want %d", len(transport.bodies), regenerations+1)
+		}
+		if len(events) != 1 || events[0].Kind != EventError {
+			t.Fatalf("events = %+v, want single EventError without EventUsage", events)
+		}
+		var abnormal *AbnormalFinishError
+		if !errors.As(events[0].Err, &abnormal) {
+			t.Fatalf("expected *AbnormalFinishError, got %T (%v)", events[0].Err, events[0].Err)
+		}
+		if abnormal.Reason != "malformed_function_call" || abnormal.Message != "hidden reasoning malformed" {
+			t.Fatalf("abnormal = %+v", abnormal)
+		}
+	})
+
+	t.Run("assistant_route", func(t *testing.T) {
+		thoughtPart := playgroundThoughtWirePart("hidden reasoning")
+		malformedPart := []any{nil, "```function_calls\n[{\"name\":\"get_weather\",\"arguments\":{broken}]\n```"}
+		step := make([]any, 16)
+		step[0] = []any{[]any{[]any{thoughtPart, malformedPart}, "model"}}
+		step[11] = int64(1)
+		step[12] = int64(1)
+		step[15] = []any{int64(10), int64(4), int64(0)}
+		message := []any{nil, nil, [][]any{step}, "applet-1"}
+		encoded, err := json.Marshal([]any{[][]any{message}, []any{int64(0)}})
+		if err != nil {
+			t.Fatalf("marshal assistant stream: %v", err)
+		}
+		malformedStream := string(encoded)
+
+		streams := make([]string, regenerations+1)
+		for index := range streams {
+			streams[index] = malformedStream
+		}
+		transport := &recoveryAssistantTransport{streams: streams}
+
+		baseModel := Model{
+			ID:           "gemini-2.5-pro",
+			Name:         "Gemini 2.5 Pro",
+			Methods:      []string{"generateContent"},
+			Capabilities: map[string]bool{"chat_model": true, "code_assistant": true},
+		}
+		entry := assistantModelEntry(modelEntry{
+			model: baseModel,
+			defaults: GenerationDefaults{
+				MaxOutputTokens: 8192,
+				Thinking:        true,
+				ThinkingLevel:   true,
+				ThinkingLevels:  []int64{1, 2, 3, 4},
+			},
+		})
+		account := &Account{
+			ID:                    "acc@example.com",
+			Config:                AccountConfig{Enabled: true},
+			State:                 AccountReady,
+			Models:                []Model{baseModel, entry.model},
+			modelAccessGeneration: 1,
+		}
+		pool := NewAccountPool([]*Account{account}, 1)
+		lease, ok, err := pool.TryAcquireFor(context.Background(), AccountSelection{ModelID: entry.model.ID, Method: "generateContent"})
+		if err != nil || !ok {
+			t.Fatalf("TryAcquireFor ok=%v err=%v", ok, err)
+		}
+		defer func() { _ = lease.Release() }()
+
+		client := NewClient(ClientOptions{Transport: transport, Protected: transport})
+		client.setModelCatalog(account.ID, modelCatalog{
+			models:  []Model{baseModel, entry.model},
+			entries: map[string]modelEntry{entry.model.ID: entry},
+		})
+
+		ctx := ContextWithAccountLease(context.Background(), lease)
+		stream, err := client.Generate(ctx, GenerateRequest{
+			ID:        "req-hidden-reasoning-assistant-malformed",
+			AccountID: account.ID,
+			Model:     entry.model.ID,
+			Config:    GenerationConfig{HideThinking: true},
+			Contents:  []Content{{Role: RoleUser, Parts: []Part{{Text: "Check weather"}}}},
+			Tools: Tools{
+				Functions: []FunctionDeclaration{{
+					Name:       "get_weather",
+					Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+				}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Generate failed: %v", err)
+		}
+		events := collectRecoveryEvents(stream)
+
+		if len(events) != 1 || events[0].Kind != EventError {
+			t.Fatalf("events = %+v, want single EventError without EventUsage", events)
+		}
+		var abnormal *AbnormalFinishError
+		if !errors.As(events[0].Err, &abnormal) || abnormal.Reason != "malformed_function_call" {
+			t.Fatalf("events[0].Err = %T (%v), want *AbnormalFinishError(malformed_function_call)", events[0].Err, events[0].Err)
+		}
+	})
+}

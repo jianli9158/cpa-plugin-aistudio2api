@@ -856,11 +856,15 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 		stopClose := closeOnCancel(response)
 		defer func() { stopClose() }()
 		providerModel := entry.model.ID
+		sentOutput := false
 		send := func(event Event) error {
 			providerModel = cmp.Or(event.ProviderModel, providerModel)
 			event.ProviderModel = providerModel
 			select {
 			case events <- event:
+				if event.Kind != EventUsage && event.Kind != EventError && event.Kind != EventFinish {
+					sentOutput = true
+				}
 				return nil
 			case <-ctx.Done():
 				return ctx.Err()
@@ -1034,7 +1038,7 @@ func (c *Client) Generate(ctx context.Context, request GenerateRequest) (<-chan 
 			return
 		}
 		if finish != nil && abnormalGenerationFinish(finish.FinishReason) {
-			if len(output.Parts) > 0 {
+			if sentOutput {
 				if usage == nil {
 					usage = previousUsage
 				}
