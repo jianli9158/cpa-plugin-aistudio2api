@@ -14,8 +14,14 @@
 > This repository is a native **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** dynamic-library plugin port (C ABI v1 / Schema v10) of **[Mag1cFall/AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)**.  
 > The core Google AI Studio protocol stack (MakerSuite `GenerateContent`, Build `CodeAssistantOffline`, Firefox/uTLS fingerprint spoofing, in-process SpiderMonkey BotGuard WAA VM, multi-account cooldown scheduling, and multi-protocol translation) originates from **[Mag1cFall/AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)** under the [MIT License](./LICENSE).
 
----
+> [!WARNING]
+> **Security Notice: Why `-build` Code-Assistant Models Were Removed in `v1.2.4`**  
+> Starting in `v1.2.4` (synced with upstream [`Mag1cFall/AIStudio2API@a68acad`](https://github.com/Mag1cFall/AIStudio2API/commit/a68acad8b56619a8bef7802131db595ee5d11b6a) and [#11](https://github.com/jianli9158/cpa-plugin-aistudio2api/issues/11)), **all `-build` code-assistant (Applet) models** (such as `gemini-3.8-flash-build` and `gemini-3.1-pro-preview-build`) have been **completely removed**:
+> 1. **How `-build` Applet Models Worked**: Under the hood, `-build` models invoked `CreateApplet` / `SaveApplet` to repeatedly create `"Untitled"` AI Studio Applets in the account's Google Drive and injected prompt overrides to hijack the Applet's internal file-editing tools for general function calling.
+> 2. **Google AI Studio Applet Ban Wave**: Google recently tightened automated abuse and malware scanning on AI Studio Applets. When `-build` models were used with coding agents (such as Claude Code, Codex, or Cline), agent system prompts, shell commands, and code payloads uploaded into Applets frequently tripped Google's safety filters—resulting in permanent AI Studio account suspensions (`servicerestricted`).
+> 3. **Recommended Alternative**: Use standard **Playground channel models** without the `-build` suffix (e.g., `gemini-3.8-flash`, `gemini-4-argon`, `gemini-3.1-pro-preview`). Playground models support native Function Calling, thinking levels (`-minimal` / `-low` / `-medium` / `-high` / `-xhigh` / `-max`), and automatic tool-call continuation without creating Drive Applets.
 
+---
 ## Key Features
 
 - **In-Process SpiderMonkey BotGuard WAA Engine**: Statically links the Firefox 152 SpiderMonkey C++ engine directly into the plugin shared library (`.dylib` / `.so` / `.dll`), executing Google BotGuard WAA bytecode and generating fresh proofs in milliseconds inside the CLIProxyAPI process—no Python, Node.js, Playwright, or headless browser required.

@@ -14,8 +14,14 @@
 > 本项目是将 **[Mag1cFall/AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)** 完整移植为 **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** 原生动态库插件（Native C ABI v1 / Schema v10）的开源项目。  
 > 核心协议栈（MakerSuite `GenerateContent`、Build `CodeAssistantOffline`、Firefox/uTLS 浏览器指纹伪装、进程内 SpiderMonkey BotGuard WAA 虚拟机、多账号冷却调度与多协议转换）均源自 **[Mag1cFall/AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)**，遵循 [MIT License](./LICENSE)。
 
----
+> [!WARNING]
+> **关于 `v1.2.4` 移除 `-build` 代码助手模型的安全说明**  
+> 自 `v1.2.4` 起（同步上游 [`Mag1cFall/AIStudio2API@a68acad`](https://github.com/Mag1cFall/AIStudio2API/commit/a68acad8b56619a8bef7802131db595ee5d11b6a) 与 [#11](https://github.com/jianli9158/cpa-plugin-aistudio2api/issues/11)），插件已**彻底移除全部 `-build` 后缀代码助手（Applet）模型**（如 `gemini-3.8-flash-build`、`gemini-3.1-pro-preview-build` 等），原因如下：
+> 1. **底层机制风险**：`-build` 代码助手模型在底层需要通过 `CreateApplet` / `SaveApplet` 在账号的 Google Drive 中频繁创建名为 `Untitled` 的 AI Studio Applet 应用，并通过提示词强行覆盖 Applet 内置的文件修改工具以模拟外部 Function Calling。
+> 2. **触发 Google 集中风控封禁**：近期 Google 针对 AI Studio Applet 加强了自动化安全审查。当在 Claude Code、Codex、Cline 等 Agent 工具中使用 `-build` 模型时，Agent 的系统提示词、终端命令或敏感代码会被作为 Applet 源码/快照上传，极易触发 Google 的恶意软件与滥用检测，导致 Google 账号被永久限制访问 AI Studio（跳转 `servicerestricted`，显示“您对该产品的使用权限已被暂停”）。
+> 3. **替代方案**：请直接使用无 `-build` 后缀的 **Playground 通道模型**（如 `gemini-3.8-flash`、`gemini-4-argon`、`gemini-3.1-pro-preview` 等）。Playground 通道原生支持标准工具调用（Function Calling）、多轮思考链（`-minimal` / `-low` / `-medium` / `-high` / `-xhigh` / `-max`）以及工具调用异常自动续写，无需创建 Applet，账号安全性更高。
 
+---
 ## 核心特性
 
 - **进程内 SpiderMonkey BotGuard WAA 引擎**：直接将 Firefox 152 SpiderMonkey C++ 引擎静态链接进动态库（`.dylib` / `.so` / `.dll`），在 CLIProxyAPI 进程内毫秒级完成 Google BotGuard WAA 字节码解释与签名生成，无需安装 Python、Node.js、Playwright 或无头浏览器。
