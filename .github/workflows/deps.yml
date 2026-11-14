@@ -31,8 +31,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang lld llvm make m4 pkg-config cmake ninja-build \
+            make m4 pkg-config cmake ninja-build \
             python3 python3-venv python3-pip zip xz-utils
+          if apt-cache show clang-20 >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends clang-20 lld-20 llvm-20
+            echo "HOST_CC_BIN=/usr/bin/clang-20" >> "$GITHUB_ENV"
+            echo "HOST_CXX_BIN=/usr/bin/clang++-20" >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19
+            echo "HOST_CC_BIN=/usr/bin/clang-19" >> "$GITHUB_ENV"
+            echo "HOST_CXX_BIN=/usr/bin/clang++-19" >> "$GITHUB_ENV"
+          fi
           sudo curl -fsSL "https://github.com/mozilla/cbindgen/releases/download/0.29.4/cbindgen-ubuntu22.04" -o /usr/local/bin/cbindgen
           sudo chmod +x /usr/local/bin/cbindgen
           echo "CBINDGEN=/usr/local/bin/cbindgen" >> "$GITHUB_ENV"
@@ -180,8 +189,8 @@ jobs:
           ac_add_options --disable-js-shell
           ac_add_options --disable-tests
           ac_add_options --disable-jemalloc
-          export HOST_CC=/usr/bin/clang
-          export HOST_CXX=/usr/bin/clang++
+          export HOST_CC=${HOST_CC_BIN}
+          export HOST_CXX=${HOST_CXX_BIN}
           export CC=${LLVM_MINGW}/bin/aarch64-w64-mingw32-clang
           export CXX=${LLVM_MINGW}/bin/aarch64-w64-mingw32-clang++
           export AR=${LLVM_MINGW}/bin/llvm-ar
