@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type generationAdmin interface {
 	Status(context.Context) (api.AdminStatus, error)
 	CatalogModels(context.Context) ([]aistudio.Model, error)
 	Accounts(context.Context) ([]api.AdminAccount, error)
+	AccountExits(context.Context) ([]api.AccountExit, error)
 	CreateAccount(context.Context, api.AccountCreateInput, *camoufoxnative.LiveView) (api.AdminAccount, error)
 	ChromeImportProfiles(context.Context) ([]api.ChromeImportProfile, error)
 	CookieBrowsers(context.Context) ([]api.CookieBrowser, error)
@@ -95,9 +97,11 @@ type runtimeManager struct {
 	startMu            sync.Mutex
 	mu                 sync.RWMutex
 	current            *runtimeGeneration
-	startCancel        context.CancelFunc
-	launching          chan struct{}
-	autoStartCancel    context.CancelFunc
+	startCancel     context.CancelFunc
+	launching       chan struct{}
+	autoStartCancel context.CancelFunc
+	// initial 是进程启动时装配、尚未启动过的生成服务，自动启动时配置未变就直接启动它而不重新载入账户
+	initial *runtimeGeneration
 }
 
 // newRuntimeManager 创建进程级管理器与初始生成服务
@@ -118,6 +122,9 @@ func newRuntimeManager(
 	}
 	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, cfg))
 	manager.current = generation
+	if cfg.AutoStart {
+		manager.initial = generation
+	}
 	return manager, nil
 }
 
@@ -158,24 +165,22 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 		manager.mu.Unlock()
 		return status, err
 	}
-	if _, err := current.admin.StopService(ctx); err != nil {
-		manager.mu.Unlock()
-		return api.AdminStatus{}, err
-	}
 	launchCtx, launchCancel := context.WithCancel(manager.lifecycle)
 	manager.startCancel = launchCancel
 	manager.launching = make(chan struct{})
+	initial := manager.initial
+	manager.initial = nil
 	manager.mu.Unlock()
 
 	var cfg config.Config
 	if manager.configPath == "" {
 		cfg = manager.activeManagement
 	} else {
-		var err error
-		cfg, err = config.Load(manager.configPath)
-		if err != nil {
+		var loadErr error
+		cfg, loadErr = config.Load(manager.configPath)
+		if loadErr != nil {
 			manager.finishStart(launchCancel)
-			return api.AdminStatus{}, err
+			return api.AdminStatus{}, loadErr
 		}
 	}
 	manager.overrides.Apply(&cfg)
@@ -184,14 +189,24 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 		return api.AdminStatus{}, err
 	}
 
-	next, err := manager.factory(launchCtx, manager.lifecycle, cfg, manager.requests)
-	if err != nil {
-		manager.finishStart(launchCancel)
-		return api.AdminStatus{}, err
+	next := current
+	var err error
+	if initial != current || !reflect.DeepEqual(cfg, current.config) {
+		if _, err := current.admin.StopService(ctx); err != nil {
+			manager.finishStart(launchCancel)
+			return api.AdminStatus{}, err
+		}
+		next, err = manager.factory(launchCtx, manager.lifecycle, cfg, manager.requests)
+		if err != nil {
+			manager.finishStart(launchCancel)
+			return api.AdminStatus{}, err
+		}
 	}
 	if launchCtx.Err() != nil {
 		manager.finishStart(launchCancel)
-		_ = next.Close()
+		if next != current {
+			_ = next.Close()
+		}
 		return manager.Status(ctx)
 	}
 
@@ -201,11 +216,15 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 	manager.current = next
 	manager.mu.Unlock()
 
-	current.lifecycleCancel()
+	if next != current {
+		current.lifecycleCancel()
+	}
 	status, startErr := next.admin.StartService(launchCtx)
 	manager.finishStart(launchCancel)
-	if err := current.Close(); err != nil {
-		manager.requests.log("service", "WARN", "旧生成服务关闭失败 | 错误="+err.Error())
+	if next != current {
+		if err := current.Close(); err != nil {
+			manager.requests.log("service", "WARN", "旧生成服务关闭失败 | 错误="+err.Error())
+		}
 	}
 	return status, startErr
 }
@@ -472,6 +491,14 @@ func (manager *runtimeManager) Accounts(ctx context.Context) ([]api.AdminAccount
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
 	return manager.current.admin.Accounts(ctx)
+}
+
+// AccountExits 查询当前生成服务各账户出口的公网 IP 与地理位置，查询期间不占用生成服务
+func (manager *runtimeManager) AccountExits(ctx context.Context) ([]api.AccountExit, error) {
+	manager.mu.RLock()
+	admin := manager.current.admin
+	manager.mu.RUnlock()
+	return admin.AccountExits(ctx)
 }
 
 // CreateAccount 在当前生成服务创建账户

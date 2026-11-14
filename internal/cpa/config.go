@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/AIStudio2API/internal/egress"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	PluginID      = "aistudio2api"
-	PluginVersion = "1.2.4"
+	PluginVersion = "1.2.5"
 	ProviderID    = "aistudio2api"
 )
 
@@ -45,6 +46,7 @@ type PluginConfig struct {
 	SearchModelAliases     *bool         `json:"search_model_aliases" yaml:"search_model_aliases"`
 	DiscoverHiddenModels   *bool         `json:"discover_hidden_models" yaml:"discover_hidden_models"`
 	GoogleSearch           *bool         `json:"google_search" yaml:"google_search"`
+	EnableAssistantModels  *bool         `json:"enable_assistant_models" yaml:"enable_assistant_models"`
 	ContinuationRewrite    *bool         `json:"continuation_rewrite" yaml:"continuation_rewrite"`
 	ContinuationPrompt     string        `json:"continuation_prompt" yaml:"continuation_prompt"`
 	AutoStart              *bool         `json:"auto_start" yaml:"auto_start"`
@@ -151,6 +153,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 			if pcfg.GoogleSearch == nil {
 				pcfg.GoogleSearch = opt.GoogleSearch
 			}
+			if pcfg.EnableAssistantModels == nil {
+				pcfg.EnableAssistantModels = opt.EnableAssistantModels
+			}
 			if pcfg.ContinuationRewrite == nil {
 				pcfg.ContinuationRewrite = opt.ContinuationRewrite
 			}
@@ -201,6 +206,7 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 		}
 	}
 	_ = os.MkdirAll(accountsDir, 0o700)
+	egress.SetCacheDir(filepath.Join(dataDir, "geoip"))
 
 	waaBackend := strings.ToLower(strings.TrimSpace(pcfg.WAABackend))
 	if waaBackend == "" {
@@ -282,6 +288,7 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 	cfg.SearchModelAliases = boolOrDefault(pcfg.SearchModelAliases, true)
 	cfg.DiscoverHiddenModels = boolOrDefault(pcfg.DiscoverHiddenModels, false)
 	cfg.GoogleSearch = boolOrDefault(pcfg.GoogleSearch, false)
+	cfg.EnableAssistantModels = boolOrDefault(pcfg.EnableAssistantModels, false)
 	cfg.ContinuationRewrite = boolOrDefault(pcfg.ContinuationRewrite, true)
 	if strings.TrimSpace(pcfg.ContinuationPrompt) != "" {
 		cfg.ContinuationPrompt = strings.TrimSpace(pcfg.ContinuationPrompt)

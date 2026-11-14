@@ -1,13 +1,16 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +21,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
+	"github.com/Mag1cFall/AIStudio2API/internal/egress"
 )
 
 // runtimeAdmin 投影运行时权威状态
@@ -125,22 +129,71 @@ func (admin *runtimeAdmin) Accounts(context.Context) ([]api.AdminAccount, error)
 	return accounts, nil
 }
 
+// AccountExits 并发查询各账户出口代理的公网 IP 与地理位置，每个代理一行，查询失败的代理带原因
+func (admin *runtimeAdmin) AccountExits(ctx context.Context) ([]api.AccountExit, error) {
+	var proxies []string
+	for _, status := range admin.pool.Status() {
+		if !slices.Contains(proxies, status.Egress) {
+			proxies = append(proxies, status.Egress)
+		}
+	}
+	exits := make([]api.AccountExit, len(proxies))
+	var wait sync.WaitGroup
+	for index, proxy := range proxies {
+		wait.Go(func() {
+			exits[index] = api.AccountExit{Proxy: proxy}
+			exit, err := egress.Lookup(ctx, proxy)
+			if err != nil {
+				exits[index].Error = err.Error()
+				return
+			}
+			exits[index].IP, exits[index].Country, exits[index].Timezone, exits[index].Locale = exit.IP, exit.Country, exit.Timezone, exit.Locale
+		})
+	}
+	wait.Wait()
+	return exits, nil
+}
+
+// accountEnvironment 返回新账户的语言与时区：locale 或 timezone 未给出时按 proxy 出口的地理位置填写并写入日志
+func (admin *runtimeAdmin) accountEnvironment(ctx context.Context, proxy string, locale string, timezone string) (egress.Exit, error) {
+	locale = strings.TrimSpace(locale)
+	if locale != "" && timezone != "" {
+		return egress.Exit{Locale: locale, Timezone: timezone}, nil
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	exit, err := egress.Environment(lookupCtx, proxy, locale, timezone)
+	if err != nil {
+		if locale == "" {
+			locale = aistudio.DefaultAccountLocale()
+		}
+		if timezone == "" {
+			timezone = aistudio.DefaultAccountTimezone()
+		}
+		admin.requests.log("auth", "WARN", fmt.Sprintf("按出口位置确定账户语言与时区失败，回退系统默认值 | 语言=%s | 时区=%s | 错误=%s", locale, timezone, err.Error()))
+		return egress.Exit{Locale: locale, Timezone: timezone}, nil
+	}
+	if exit.IP != "" {
+		admin.requests.log("auth", "INFO", fmt.Sprintf("账户语言与时区按出口位置 | 出口=%s | 国家=%s | 语言=%s | 时区=%s", exit.IP, exit.Country, exit.Locale, exit.Timezone))
+	}
+	return exit, nil
+}
+
 func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountCreateInput, view *camoufoxnative.LiveView) (api.AdminAccount, error) {
 	accountConfig := aistudio.DefaultAccountConfig("")
 	accountConfig.Proxy = strings.TrimSpace(input.Proxy)
-	if locale := strings.TrimSpace(input.Locale); locale != "" {
-		accountConfig.Locale = locale
-	}
 	timezone, err := accountTimezone(input.Timezone)
 	if err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
-	if timezone != "" {
-		accountConfig.Timezone = timezone
-	}
 	if err := config.ValidateProxy(accountConfig.Proxy); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
+	environment, err := admin.accountEnvironment(ctx, admin.effectiveProxy(accountConfig.Proxy), input.Locale, timezone)
+	if err != nil {
+		return api.AdminAccount{}, err
+	}
+	accountConfig.Locale, accountConfig.Timezone = environment.Locale, environment.Timezone
 	directory, err := os.MkdirTemp("", "aistudio2api-account-login-*")
 	if err != nil {
 		return api.AdminAccount{}, fmt.Errorf("创建隔离登录目录: %w", err)
@@ -290,12 +343,11 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	accountConfig := aistudio.DefaultAccountConfig(label)
 	accountConfig.AuthUser = input.AuthUser
 	accountConfig.Proxy = strings.TrimSpace(input.Proxy)
-	if locale := strings.TrimSpace(input.Locale); locale != "" {
-		accountConfig.Locale = locale
+	environment, err := admin.accountEnvironment(ctx, admin.effectiveProxy(accountConfig.Proxy), input.Locale, timezone)
+	if err != nil {
+		return api.AdminAccount{}, err
 	}
-	if timezone != "" {
-		accountConfig.Timezone = timezone
-	}
+	accountConfig.Locale, accountConfig.Timezone = environment.Locale, environment.Timezone
 	if err := accountConfig.Validate(); err != nil {
 		return api.AdminAccount{}, invalidAccount(err)
 	}
@@ -1050,6 +1102,8 @@ func (admin *runtimeAdmin) Cooldowns(context.Context) ([]api.AdminCooldown, erro
 			modelID, build := strings.CutPrefix(key, string(aistudio.ChannelBuild)+":")
 			if build {
 				channel = string(aistudio.ChannelBuild)
+			} else if admin.pool.AssistantModel(modelID) {
+				channel = string(aistudio.ChannelAssistant)
 			}
 			cooldowns = append(cooldowns, api.AdminCooldown{
 				AccountID: account.ID, AccountLabel: account.Label, Channel: channel,
@@ -1155,7 +1209,17 @@ func openAdminEvents(
 				refreshTimer.Stop()
 			}
 		}()
+		// sent 是本连接各类快照最近一次发出的内容，内容相同的快照跳过发送
+		sent := map[string][]byte{}
 		send := func(event api.AdminEvent) bool {
+			switch event.Type {
+			case "status", "models", "accounts", "cooldowns":
+				encoded, err := json.Marshal(event.Data)
+				if err == nil && bytes.Equal(encoded, sent[event.Type]) {
+					return true
+				}
+				sent[event.Type] = encoded
+			}
 			select {
 			case events <- event:
 				return true

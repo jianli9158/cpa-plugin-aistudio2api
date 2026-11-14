@@ -104,6 +104,7 @@ func (p *Plugin) handleManagementRegister() (any, error) {
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/refresh", Description: "Refresh an account's model catalog and benefit tier"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/update", Description: "Update account settings (enabled, proxy, locale, timezone)"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/delete", Description: "Delete an account"},
+			{Method: http.MethodGet, Path: "/v0/management/aistudio2api/accounts/exits", Description: "Inspect egress IP, country, timezone, and locale per configured proxy"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/sync-auth", Description: "Sync all AIStudio2API accounts to CLIProxyAPI auths/ directory"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/cooldowns/clear", Description: "Clear account cooldowns"},
 			{Method: http.MethodGet, Path: "/v0/management/aistudio2api/models", Description: "List discovered AI Studio models"},
@@ -186,6 +187,15 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			return jsonManagementResponse(http.StatusInternalServerError, map[string]any{"error": err.Error()}), nil
 		}
 		return jsonManagementResponse(http.StatusOK, map[string]any{"accounts": redactAdminAccounts(accounts)}), nil
+	case method == http.MethodGet && path == "/v0/management/aistudio2api/accounts/exits":
+		exits, err := rt.Admin.AccountExits(p.ctx)
+		if err != nil {
+			return jsonManagementResponse(http.StatusBadGateway, map[string]any{"error": err.Error()}), nil
+		}
+		for i := range exits {
+			exits[i].Proxy = redactProxyURLString(exits[i].Proxy)
+		}
+		return jsonManagementResponse(http.StatusOK, map[string]any{"exits": exits}), nil
 
 	case method == http.MethodPost && path == "/v0/management/aistudio2api/accounts/login-browser":
 		if !p.chromeLogin.TryLock() {
@@ -527,6 +537,8 @@ func (p *Plugin) buildStatusManagementResponse(rt *app.PluginRuntime) pluginapi.
 			} else if after, ok := strings.CutPrefix(sc, string(aistudio.ChannelBuild)+":"); ok {
 				modelID = after
 				channel = string(aistudio.ChannelBuild)
+			} else if rt.Pool().AssistantModel(modelID) {
+				channel = string(aistudio.ChannelAssistant)
 			}
 			cooldowns = append(cooldowns, api.AdminCooldown{
 				AccountID:    st.ID,
@@ -553,6 +565,7 @@ func (p *Plugin) buildStatusManagementResponse(rt *app.PluginRuntime) pluginapi.
 		"accounts_dir":     p.appCfg.AuthStates,
 		"chrome_available": chromeBin != "",
 		"chrome_binary":    chromeBin,
+		"enable_assistant_models": p.appCfg.EnableAssistantModels,
 	})
 }
 

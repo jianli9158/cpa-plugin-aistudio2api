@@ -301,6 +301,12 @@ func (p *Plugin) registrationPayload() rpcRegistration {
 					Description: "存在可用账户时自动路由无前缀的 AI Studio 模型（Playground 与 Build 通道）",
 				},
 				{
+					Name:        "enable_assistant_models",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Default:     false,
+					Description: "是否启用高风控的 -build 写代码助手模型（Google 对频繁代码/命令操作的 Applet 易触发封禁限制，默认禁用）",
+				},
+				{
 					Name:        "sync_auth_files",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
 					Default:     true,

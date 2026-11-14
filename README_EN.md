@@ -15,19 +15,19 @@
 > The core Google AI Studio protocol stack (MakerSuite `GenerateContent`, Build `CodeAssistantOffline`, Firefox/uTLS fingerprint spoofing, in-process SpiderMonkey BotGuard WAA VM, multi-account cooldown scheduling, and multi-protocol translation) originates from **[Mag1cFall/AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)** under the [MIT License](./LICENSE).
 
 > [!WARNING]
-> **Security Notice: Why `-build` Code-Assistant Models Were Removed in `v1.2.4`**  
-> Starting in `v1.2.4` (synced with upstream [`Mag1cFall/AIStudio2API@a68acad`](https://github.com/Mag1cFall/AIStudio2API/commit/a68acad8b56619a8bef7802131db595ee5d11b6a) and [#11](https://github.com/jianli9158/cpa-plugin-aistudio2api/issues/11)), **all `-build` code-assistant (Applet) models** (such as `gemini-3.8-flash-build` and `gemini-3.1-pro-preview-build`) have been **completely removed**:
+> **Security Notice: `-build` Code-Assistant Models Protected Off by Default (`v1.2.5`)**  
+> Starting in `v1.2.4` / `v1.2.5` (synced with upstream [`Mag1cFall/AIStudio2API`](https://github.com/Mag1cFall/AIStudio2API) and [#11](https://github.com/jianli9158/cpa-plugin-aistudio2api/issues/11)), all `-build` code-assistant (Applet) models are **disabled by default (`enable_assistant_models: false`)**:
 > 1. **How `-build` Applet Models Worked**: Under the hood, `-build` models invoked `CreateApplet` / `SaveApplet` to repeatedly create `"Untitled"` AI Studio Applets in the account's Google Drive and injected prompt overrides to hijack the Applet's internal file-editing tools for general function calling.
 > 2. **Google AI Studio Applet Ban Wave**: Google recently tightened automated abuse and malware scanning on AI Studio Applets. When `-build` models were used with coding agents (such as Claude Code, Codex, or Cline), agent system prompts, shell commands, and code payloads uploaded into Applets frequently tripped Google's safety filters—resulting in permanent AI Studio account suspensions (`servicerestricted`).
-> 3. **Recommended Alternative**: Use standard **Playground channel models** without the `-build` suffix (e.g., `gemini-3.8-flash`, `gemini-4-argon`, `gemini-3.1-pro-preview`). Playground models support native Function Calling, thinking levels (`-minimal` / `-low` / `-medium` / `-high` / `-xhigh` / `-max`), and automatic tool-call continuation without creating Drive Applets.
+> 3. **Recommended Usage**: Use standard **Playground channel models** without the `-build` suffix (e.g., `gemini-3.8-flash`, `gemini-4-argon`, `gemini-3.1-pro-preview`). If you specifically need `-build` models on disposable test accounts, explicitly set `enable_assistant_models: true` in plugin config.
 
 ---
 ## Key Features
 
-- **In-Process SpiderMonkey BotGuard WAA Engine**: Statically links the Firefox 152 SpiderMonkey C++ engine directly into the plugin shared library (`.dylib` / `.so` / `.dll`), executing Google BotGuard WAA bytecode and generating fresh proofs in milliseconds inside the CLIProxyAPI process—no Python, Node.js, Playwright, or headless browser required.
+- **In-Process SpiderMonkey BotGuard WAA Engine**: Statically links the Firefox 158 SpiderMonkey C++ engine directly into the plugin shared library (`.dylib` / `.so` / `.dll`), executing Google BotGuard WAA bytecode and generating fresh proofs in milliseconds inside the CLIProxyAPI process—no Python, Node.js, Playwright, or headless browser required.
 - **Full Playground + Build Channel Support**:
   - **Playground Channel** (`MakerSuiteService/GenerateContent`): Supports `gemini-3.8-flash`, `gemini-4-argon`, `gemini-2.5-pro`, `gemini-2.5-flash`, Imagen, Veo, TTS, Decision, and thinking-level suffixes (`-minimal` / `-low` / `-medium` / `-high` / `-xhigh` / `-max`).
-  - **Build Proxy Channel**: Retains the legacy Build proxy channel and optional frontend hidden-model discovery (`-build` code-assistant applet models have been removed for account safety).
+  - **Build Proxy Channel**: Supports the Build proxy channel and optional hidden-model discovery; high-risk `-build` code-assistant models are disabled by default unless `enable_assistant_models: true` is set.
 - **Native 4-Protocol Input/Output**: Accepts and streams `chat-completions` (OpenAI Chat), `responses` (OpenAI Responses), `anthropic` (Claude Messages), and `gemini` (Google Gemini Native) formats.
 - **Complete CLIProxyAPI Plugin Capabilities (All 9 Interfaces)**:
   1. `auth_provider`: Supports clicking **"Start Login"** directly in the ECPA / CPA OAuth dashboard (`auth.login_start` / `auth.login_poll`) to launch an isolated local Chrome window and auto-capture credentials, syncing 1-to-1 with `~/.cli-proxy-api/aistudio2api-<email>.json`.
@@ -51,7 +51,7 @@ flowchart LR
         Router["Model Router & Scheduler"] --> Runtime["AIStudio2API Runtime Manager"]
         Runtime --> Pool["Account Pool & Cooldown Manager"]
         Runtime --> SM["In-Process SpiderMonkey VM (BotGuard WAA)"]
-        Runtime --> UTLS["Firefox 152 uTLS / HTTP2 / HTTP3 Client"]
+        UTLS["Firefox 158 uTLS / HTTP2 / HTTP3 Client"]
     end
     UTLS -->|"MakerSuite RPC (GenerateContent / CodeAssistantOffline)"| Google["Google AI Studio Upstream"]
 ```
@@ -65,12 +65,12 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases):
-   - macOS Apple Silicon: `aistudio2api_1.2.4_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.4_darwin_amd64.zip`
-   - Linux x86_64: `aistudio2api_1.2.4_linux_amd64.zip`
-   - Linux ARM64: `aistudio2api_1.2.4_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.4_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.4_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.5_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.5_darwin_amd64.zip`
+   - Linux x86_64: `aistudio2api_1.2.5_linux_amd64.zip`
+   - Linux ARM64: `aistudio2api_1.2.5_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.5_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.5_windows_arm64.zip`
 2. Extract the dynamic library (`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
@@ -137,6 +137,7 @@ plugins:
 | `upstream_channels` | `[]string` | `["playground"]` | Enabled upstream channels (defaults to `["playground"]`; set to `["playground", "build"]` to also enable Build proxy channel) |
 | `first_event_hedge` | `string` | `"auto"` | First-event timeout backup request hedging policy (`auto` adapts to recent latency, or duration like `"6s"`, `off` to disable) |
 | `first_event_hedge_models` | `string` | `"gemini-4-argon"` | Target models for first-event hedging (comma-separated, `*` for all models) |
+| `enable_assistant_models` | `bool` | `false` | Enable high-risk `-build` code-assistant models (disabled by default to protect accounts; test accounts only) |
 
 ---
 

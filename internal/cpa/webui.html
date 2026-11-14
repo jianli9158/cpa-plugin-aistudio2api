@@ -503,6 +503,7 @@
         <h1>AIStudio2API 插件控制台</h1>
         <span id="stateBadge" class="badge"><span class="status-dot"></span>加载中</span>
         <span id="waaBadge" class="badge accent">WAA: spidermonkey</span>
+        <span id="assistantBadge" class="badge">Build 助手: 已保护禁用</span>
       </div>
       <div class="subtitle">
         Google AI Studio (Playground + Build) · 进程内 SpiderMonkey BotGuard VM · 原生支持 OpenAI / Responses / Claude / Gemini
@@ -617,8 +618,12 @@
         <h2 class="section-title">账户池与 WAA 状态</h2>
         <span id="accountPoolBadge" class="badge">0 个账户</span>
       </div>
-      <button class="secondary sm" data-action="load-status">刷新列表</button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button id="checkExitsBtn" class="secondary sm" data-action="check-exits">检查出口 IP</button>
+        <button class="secondary sm" data-action="load-status">刷新列表</button>
+      </div>
     </div>
+    <div id="exitsSummaryBox" style="display:none; margin-bottom:12px;"></div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -840,6 +845,12 @@ async function loadStatus() {
       }
     }
     document.getElementById('waaBadge').textContent = 'WAA: ' + (data.waa_backend || 'spidermonkey');
+    const assistantBadge = document.getElementById('assistantBadge');
+    if (assistantBadge) {
+      const enabled = Boolean(data.enable_assistant_models);
+      assistantBadge.textContent = enabled ? 'Build 助手: 已启用 (高风控)' : 'Build 助手: 已保护禁用';
+      assistantBadge.className = 'badge ' + (enabled ? 'warning' : 'success');
+    }
     document.getElementById('statAccounts').textContent = ((counts.ready || 0) + (counts.busy || 0)) + ' / ' + (counts.total || 0);
     document.getElementById('statModels').textContent = data.models_count || 0;
 
@@ -1238,7 +1249,7 @@ async function discoverCookieAccounts() {
   const proxy = proxyEl ? proxyEl.value.trim() : '';
   try {
     const res = await apiCall('/v0/management/aistudio2api/accounts/discover-cookies', 'POST', { cookies, proxy });
-    const list = (res.accounts || []).map(a => a.email + ' (authuser=' + a.auth_user + (a.imported ? ', 已导入' : '') + ')').join(', ');
+    const list = (res.accounts || []).map(a => a.email + ' (authuser=' + a.auth_user + (a.imported ? ', 已导入' : '') + (a.restricted ? ', 受限: ' + a.restricted : '') + ')').join(', ');
     showToast('识别到账号: ' + (list || '无'), false);
   } catch (e) {
     showToast('识别失败: ' + e.message, true);
@@ -1255,6 +1266,55 @@ async function refreshAccount(id) {
     showToast('刷新失败: ' + e.message, true);
   }
 }
+async function checkAccountExits() {
+  const btn = document.getElementById('checkExitsBtn');
+  const box = document.getElementById('exitsSummaryBox');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '检测中...';
+  }
+  try {
+    const res = await apiCall('/v0/management/aistudio2api/accounts/exits');
+    const exits = res.exits || [];
+    if (!box) return;
+    if (!exits.length) {
+      box.style.display = 'block';
+      box.innerHTML = '<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px; color:var(--muted);">当前没有可检测的账户出口配置</div>';
+      return;
+    }
+    const ipCounts = new Map();
+    for (const acc of (latestAccounts || [])) {
+      const accEgress = acc.egress || '';
+      const match = exits.find(e => (e.proxy || '') === accEgress);
+      if (match && match.ip) {
+        ipCounts.set(match.ip, (ipCounts.get(match.ip) || 0) + 1);
+      }
+    }
+    const rows = exits.map(e => {
+      const proxyLabel = e.proxy ? escapeHtml(e.proxy) : '全局 / 直连';
+      if (e.error) {
+        return '<div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">' +
+          '<span style="font-family:ui-monospace,Menlo,monospace; color:var(--text-secondary);">' + proxyLabel + '</span>' +
+          '<span style="color:#fca5a5;">检测失败: ' + escapeHtml(e.error) + '</span></div>';
+      }
+      const count = ipCounts.get(e.ip) || 0;
+      const sharedBadge = count > 1 ? ' <span class="badge warning" style="font-size:10px; padding:1px 6px;">共用出口 (' + count + ' 账户)</span>' : '';
+      return '<div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06); flex-wrap:wrap;">' +
+        '<span style="font-family:ui-monospace,Menlo,monospace; color:#93c5fd;">' + proxyLabel + '</span>' +
+        '<span><strong>' + escapeHtml(e.ip || '-') + '</strong> · ' + escapeHtml(e.country || '-') + ' · ' + escapeHtml(e.timezone || '-') + ' (' + escapeHtml(e.locale || '-') + ')' + sharedBadge + '</span></div>';
+    }).join('');
+    box.style.display = 'block';
+    box.innerHTML = '<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px;">' + rows + '</div>';
+  } catch (e) {
+    showToast('出口 IP 检测失败: ' + e.message, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '检查出口 IP';
+    }
+  }
+}
+
 
 async function toggleAccount(id, enabled) {
   const acc = (latestAccounts || []).find(a => a.id === id);
@@ -1368,6 +1428,7 @@ document.addEventListener('click', e => {
     case 'discover-cookie': discoverCookieAccounts(); break;
     case 'load-status': loadStatus(); break;
     case 'load-logs': loadLogs(); break;
+    case 'check-exits': checkAccountExits(); break;
     case 'edit-proxy': openEditProxy(id, btn.dataset.proxy || ''); break;
     case 'save-proxy': saveAccountProxy(id); break;
     case 'clear-proxy': saveAccountProxy(id, ''); break;

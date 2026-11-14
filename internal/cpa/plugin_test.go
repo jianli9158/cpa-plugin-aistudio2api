@@ -858,3 +858,98 @@ func TestSchedulerPickDefersToHostSessionAffinityWhenPartialPoolCooldown(t *test
 		t.Fatalf("expected Handled=false when hostDispatched and >=1 candidate is eligible so host SessionAffinitySelector runs, got: %+v", sResp)
 	}
 }
+
+func TestAssistantModelsOptInGateAndLiveReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	accDir := filepath.Join(tmpDir, "accounts", "tester@example.com")
+	_ = os.MkdirAll(accDir, 0o700)
+	_ = os.WriteFile(filepath.Join(accDir, "account.json"), []byte(`{"label":"tester@example.com","enabled":true,"locale":"en-US","timezone":"UTC"}`), 0o600)
+	_ = os.WriteFile(filepath.Join(accDir, "storage-state.json"), []byte(`{"cookies":[{"name":"SAPISID","value":"123","domain":".google.com","path":"/","expires":-1},{"name":"__Secure-1PAPISID","value":"456","domain":".google.com","path":"/","expires":-1},{"name":"__Secure-3PAPISID","value":"789","domain":".google.com","path":"/","expires":-1}]}`), 0o600)
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	baseYAML := "data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\n"
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte(baseYAML),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("runtime failed: %v", err)
+	}
+	if err := rt.Pool().SetCatalog("tester@example.com", aistudio.BenefitTierPro, []aistudio.Model{
+		{ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Methods: []string{"generateContent"}, Capabilities: map[string]bool{"chat_model": true}},
+		{ID: "gemini-3.8-flash-build", Name: "Gemini 3.8 Flash (Build)", Methods: []string{"generateContent"}, Capabilities: map[string]bool{"chat_model": true, "assistant_route": true}},
+	}); err != nil {
+		t.Fatalf("SetCatalog failed: %v", err)
+	}
+
+	// Default: enable_assistant_models is false, so -build is excluded from catalog and rejected on Generate.
+	staticRes, err := p.HandleMethod(pluginabi.MethodModelStatic, nil)
+	if err != nil {
+		t.Fatalf("model.static failed: %v", err)
+	}
+	modelResp := staticRes.(pluginapi.ModelResponse)
+	for _, m := range modelResp.Models {
+		if strings.HasSuffix(m.ID, "-build") {
+			t.Fatalf("expected -build model to be hidden when enable_assistant_models=false, got %s", m.ID)
+		}
+	}
+
+	if !rt.Pool().AssistantModel("gemini-3.8-flash-build") {
+		t.Fatal("expected AssistantModel(gemini-3.8-flash-build)=true metadata")
+	}
+	routeDisabledReq, _ := json.Marshal(pluginapi.ModelRouteRequest{
+		RequestedModel: "gemini-3.8-flash-build",
+	})
+	if routeRes, err := p.HandleMethod(pluginabi.MethodModelRoute, routeDisabledReq); err != nil {
+		t.Fatalf("model.route failed: %v", err)
+	} else if routeResp := routeRes.(pluginapi.ModelRouteResponse); routeResp.Handled {
+		t.Fatalf("expected model.route to reject disabled -build model, got %+v", routeResp)
+	}
+	if statuses := rt.Pool().Status(); len(statuses) != 1 || len(statuses[0].Models) != 1 {
+		t.Fatalf("expected 1 pool status model when assistant disabled, got %+v", statuses)
+	}
+
+	// Live reload with enable_assistant_models: true exposes -build with risk warning.
+	reloadReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte(baseYAML + "enable_assistant_models: true\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginReconfigure, reloadReq); err != nil {
+		t.Fatalf("plugin.reconfigure failed: %v", err)
+	}
+	staticEnabledRes, err := p.HandleMethod(pluginabi.MethodModelStatic, nil)
+	if err != nil {
+		t.Fatalf("model.static after enable failed: %v", err)
+	}
+	foundBuild := false
+	for _, m := range staticEnabledRes.(pluginapi.ModelResponse).Models {
+		if m.ID == "gemini-3.8-flash-build" {
+			foundBuild = true
+			if !strings.Contains(m.Description, "高风控") {
+				t.Fatalf("expected high-risk warning in -build model description, got %q", m.Description)
+			}
+		}
+	}
+	if !foundBuild {
+		t.Fatal("expected gemini-3.8-flash-build to appear after enable_assistant_models=true")
+	}
+	if routeRes, err := p.HandleMethod(pluginabi.MethodModelRoute, routeDisabledReq); err != nil {
+		t.Fatalf("model.route after enable failed: %v", err)
+	} else if routeResp := routeRes.(pluginapi.ModelRouteResponse); !routeResp.Handled {
+		t.Fatalf("expected model.route to handle -build model after enable_assistant_models=true, got %+v", routeResp)
+	}
+	if statuses := rt.Pool().Status(); len(statuses) != 1 || len(statuses[0].Models) != 2 {
+		t.Fatalf("expected 2 pool status models after enable_assistant_models=true, got %+v", statuses)
+	}
+}

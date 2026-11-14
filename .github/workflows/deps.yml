@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 env:
-  SPIDERMONKEY_TAG: v152.0.4-aistudio2api.1
+  SPIDERMONKEY_TAG: v158.0.1-aistudio2api.1
   LIBWEBP_TAG: v1.6.0-aistudio2api.1
   LLVM_MINGW_VER: "20261020"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -94,50 +94,56 @@ jobs:
 
           init_cfg = root / "build/moz.configure/init.configure"
           text = init_cfg.read_text(encoding="utf-8")
-          old_os = '''    elif os in ("windows-msvc", "windows-gnu"):
-                  canonical_os = canonical_kernel = "WINNT"
-                  if os == "windows-msvc":
-                      abi = "msvc"
-                  elif os == "windows-gnu":
-                      abi = "mingw"'''
-          new_os = '''    elif os in ("windows-msvc", "windows-gnu", "windows-gnullvm"):
-                  canonical_os = canonical_kernel = "WINNT"
-                  if os == "windows-msvc":
-                      abi = "msvc"
-                  else:
-                      abi = "mingw"
-                  if os == "windows-gnullvm":
-                      os = "windows-gnu"'''
+          old_os = (
+              '    elif os in ("windows-msvc", "windows-gnu"):\n'
+              '        canonical_os = canonical_kernel = "WINNT"\n'
+              '        if os == "windows-msvc":\n'
+              '            abi = "msvc"\n'
+              '        elif os == "windows-gnu":\n'
+              '            abi = "mingw"'
+          )
+          new_os = (
+              '    elif os in ("windows-msvc", "windows-gnu", "windows-gnullvm"):\n'
+              '        canonical_os = canonical_kernel = "WINNT"\n'
+              '        if os == "windows-msvc":\n'
+              '            abi = "msvc"\n'
+              '        else:\n'
+              '            abi = "mingw"\n'
+              '        if os == "windows-gnullvm":\n'
+              '            os = "windows-gnu"'
+          )
           assert old_os in text, "init.configure os block not found"
           text = text.replace(old_os, new_os, 1)
 
-          old_munge = '''    munging = {
-                  "-windows-msvc": "-mingw32",
-                  "-windows-gnu": "-mingw32",
-                  "-ios-sim": "-ios",
-              }'''
-          new_munge = '''    munging = {
-                  "-windows-msvc": "-mingw32",
-                  "-windows-gnu": "-mingw32",
-                  "-windows-gnullvm": "-mingw32",
-                  "-ios-sim": "-ios",
-              }'''
+          old_munge = (
+              '    munging = {\n'
+              '        "-windows-msvc": "-mingw32",\n'
+              '        "-windows-gnu": "-mingw32",\n'
+              '        "-ios-sim": "-ios",\n'
+              '    }'
+          )
+          new_munge = (
+              '    munging = {\n'
+              '        "-windows-msvc": "-mingw32",\n'
+              '        "-windows-gnu": "-mingw32",\n'
+              '        "-windows-gnullvm": "-mingw32",\n'
+              '        "-ios-sim": "-ios",\n'
+              '    }'
+          )
           assert old_munge in text, "init.configure munging block not found"
           text = text.replace(old_munge, new_munge, 1)
           init_cfg.write_text(text, encoding="utf-8")
 
           rust_cfg = root / "build/moz.configure/rust.configure"
           rtext = rust_cfg.read_text(encoding="utf-8")
-          old_rust = '''def detect_rustc_target(
-              host_or_target, compiler_info, arm_target, rust_supported_targets
-          ):'''
-          new_rust = '''def detect_rustc_target(
-              host_or_target, compiler_info, arm_target, rust_supported_targets
-          ):
-              if host_or_target.kernel == "Linux" and host_or_target.cpu == "x86_64":
-                  return "x86_64-unknown-linux-gnu"
-              if host_or_target.kernel == "WINNT" and host_or_target.cpu == "aarch64" and host_or_target.abi == "mingw":
-                  return "aarch64-pc-windows-gnullvm"'''
+          old_rust = "def detect_rustc_target(host_or_target, arm_target, rust_supported_targets):"
+          new_rust = (
+              "def detect_rustc_target(host_or_target, arm_target, rust_supported_targets):\n"
+              '    if host_or_target.kernel == "Linux" and host_or_target.cpu == "x86_64":\n'
+              '        return "x86_64-unknown-linux-gnu"\n'
+              '    if host_or_target.kernel == "WINNT" and host_or_target.cpu == "aarch64" and host_or_target.abi == "mingw":\n'
+              '        return "aarch64-pc-windows-gnullvm"'
+          )
           assert old_rust in rtext, "rust.configure detect_rustc_target not found"
           rtext = rtext.replace(old_rust, new_rust, 1)
           rust_cfg.write_text(rtext, encoding="utf-8")

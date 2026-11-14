@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -279,17 +280,34 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 	}
 
 	var exited atomic.Bool
+	var exitMu sync.Mutex
+	var exitErr error
 	waitDone := make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
+		err := cmd.Wait()
+		exitMu.Lock()
+		exitErr = err
+		exitMu.Unlock()
 		exited.Store(true)
 		close(waitDone)
 	}()
+	readExitErr := func() error {
+		exitMu.Lock()
+		defer exitMu.Unlock()
+		return exitErr
+	}
 
+	var debugPort atomic.Int64
 	closeBrowser := func(pageWS string) error {
-		if pageWS != "" {
+		targetWS := strings.TrimSpace(pageWS)
+		if targetWS == "" {
+			if port := int(debugPort.Load()); port > 0 {
+				targetWS = discoverBrowserWSURL(port)
+			}
+		}
+		if targetWS != "" {
 			closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = cdpCloseBrowser(closeCtx, pageWS)
+			_ = cdpCloseBrowser(closeCtx, targetWS)
 			closeCancel()
 		}
 		if !exited.Load() && cmd.Process != nil {
@@ -308,10 +326,11 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 		_ = closeBrowser("")
 	}()
 
-	debugPort, err := waitForDevToolsActivePort(loginCtx, userDataDir, &exited)
+	port, detached, err := waitForDevToolsActivePortWithGrace(loginCtx, userDataDir, &exited, waitDone, readExitErr, 8*time.Second)
 	if err != nil {
 		return IsolatedLoginResult{}, err
 	}
+	debugPort.Store(int64(port))
 
 	// 阶段 1：轮询 /json/list，等待用户登录 Google 并进入 AI Studio 且输入框就绪（新号需完成条款弹窗）
 	var activePageWS string
@@ -321,17 +340,19 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 	var driveError string
 
 	httpClient := &http.Client{Timeout: 3 * time.Second}
+	consecutiveCDPErrors := 0
 	for {
 		if err := loginCtx.Err(); err != nil {
 			return IsolatedLoginResult{}, fmt.Errorf("等待 Chrome 窗口登录超时或已取消: %w", err)
 		}
-		if exited.Load() {
-			return IsolatedLoginResult{}, errors.New("Chrome 登录窗口已关闭，登录已取消")
-		}
 
-		targets, err := listCDPTargets(loginCtx, httpClient, debugPort)
+		targets, err := listCDPTargets(loginCtx, httpClient, port)
 		if err != nil {
-			if exited.Load() {
+			consecutiveCDPErrors++
+			if !detached && exited.Load() {
+				return IsolatedLoginResult{}, errors.New("Chrome 登录窗口已关闭，登录已取消")
+			}
+			if detached && consecutiveCDPErrors >= 3 {
 				return IsolatedLoginResult{}, errors.New("Chrome 登录窗口已关闭，登录已取消")
 			}
 			select {
@@ -340,6 +361,11 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 			case <-time.After(400 * time.Millisecond):
 				continue
 			}
+		}
+		consecutiveCDPErrors = 0
+		if !detached && exited.Load() {
+			// 原进程已退出但同目录的 CDP 服务仍存活（例如 Windows Chrome 降权重启子进程），切换为 CDP 存活检测
+			detached = true
 		}
 
 		var aiStudioTarget *cdpPageTarget
@@ -387,7 +413,7 @@ func (driver *NativeLoginDriver) Login(ctx context.Context, request IsolatedLogi
 					verifiedEmail = email
 					if info.AccessTokenStatus == http.StatusUnauthorized {
 						// 阶段 3：与原版一致，新账号未授权 Google Drive 时自动跳转 /library 点击 Allow Drive access 并完成 OAuth 授权弹窗
-						if authErr := authorizeDriveOverCDP(loginCtx, httpClient, debugPort, activePageWS, verifiedEmail, &exited); authErr != nil {
+						if authErr := authorizeDriveOverCDP(loginCtx, httpClient, port, activePageWS, verifiedEmail, &exited, detached); authErr != nil {
 							driveError = authErr.Error()
 						}
 						if refreshedState, _, refreshErr := inspectAIStudioPage(loginCtx, activePageWS); refreshErr == nil && len(refreshedState.Cookies) > 0 {
@@ -437,32 +463,103 @@ type cdpPageTarget struct {
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
+func readDevToolsActivePort(portFile string) (int, bool) {
+	data, err := os.ReadFile(portFile)
+	if err != nil {
+		return 0, false
+	}
+	line, rest, hasNewline := strings.Cut(string(data), "\n")
+	if !hasNewline || strings.TrimSpace(rest) == "" {
+		return 0, false
+	}
+	port, convErr := strconv.Atoi(strings.TrimSpace(line))
+	if convErr != nil || port <= 0 || port > 65535 {
+		return 0, false
+	}
+	return port, true
+}
+
 func waitForDevToolsActivePort(ctx context.Context, userDataDir string, exited *atomic.Bool) (int, error) {
+	port, _, err := waitForDevToolsActivePortWithGrace(ctx, userDataDir, exited, nil, nil, 8*time.Second)
+	return port, err
+}
+
+func waitForDevToolsActivePortWithGrace(
+	ctx context.Context,
+	userDataDir string,
+	exited *atomic.Bool,
+	waitDone <-chan struct{},
+	exitErrFn func() error,
+	exitGrace time.Duration,
+) (int, bool, error) {
 	portFile := filepath.Join(userDataDir, "DevToolsActivePort")
+	if exitGrace <= 0 {
+		exitGrace = 8 * time.Second
+	}
+	var exitedAt time.Time
 	for {
+		if port, ok := readDevToolsActivePort(portFile); ok {
+			return port, exited != nil && exited.Load(), nil
+		}
 		if err := ctx.Err(); err != nil {
-			return 0, fmt.Errorf("等待 Chrome 调试端口超时: %w", err)
+			return 0, false, fmt.Errorf("等待 Chrome 调试端口超时: %w", err)
 		}
-		if exited.Load() {
-			return 0, errors.New("Chrome 无痕窗口启动后立即退出（请确认本机 Chrome 可正常打开）")
-		}
-		data, err := os.ReadFile(portFile)
-		if err == nil {
-			line, rest, hasNewline := strings.Cut(string(data), "\n")
-			if hasNewline && strings.TrimSpace(rest) != "" {
-				if port, convErr := strconv.Atoi(strings.TrimSpace(line)); convErr == nil && port > 0 && port <= 65535 {
-					return port, nil
+		if exited != nil && exited.Load() {
+			if exitedAt.IsZero() {
+				exitedAt = time.Now()
+			} else if time.Since(exitedAt) >= exitGrace {
+				var exitDetail error
+				if exitErrFn != nil {
+					exitDetail = exitErrFn()
 				}
+				if exitDetail != nil {
+					return 0, false, fmt.Errorf("Chrome 无痕窗口启动后立即退出（%v）（请确认本机 Chrome 可正常打开）", exitDetail)
+				}
+				return 0, false, errors.New("Chrome 无痕窗口启动后立即退出（请确认本机 Chrome 可正常打开）")
 			}
+		}
+		pollDelay := 120 * time.Millisecond
+		if waitDone != nil && exitedAt.IsZero() {
+			select {
+			case <-ctx.Done():
+				return 0, false, ctx.Err()
+			case <-waitDone:
+				exitedAt = time.Now()
+			case <-time.After(pollDelay):
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
-		case <-time.After(150 * time.Millisecond):
+			return 0, false, ctx.Err()
+		case <-time.After(pollDelay):
 		}
 	}
 }
 
+func discoverBrowserWSURL(port int) string {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client := &http.Client{Timeout: time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/version", port), nil)
+	if err == nil {
+		if resp, doErr := client.Do(req); doErr == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var version struct {
+					WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+				}
+				if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&version) == nil && strings.TrimSpace(version.WebSocketDebuggerURL) != "" {
+					return strings.TrimSpace(version.WebSocketDebuggerURL)
+				}
+			}
+		}
+	}
+	if targets, err := listCDPTargets(ctx, client, port); err == nil && len(targets) > 0 {
+		return strings.TrimSpace(targets[0].WebSocketDebuggerURL)
+	}
+	return ""
+}
 func listCDPTargets(ctx context.Context, client *http.Client, port int) ([]cdpPageTarget, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/json/list", port), nil)
 	if err != nil {
@@ -780,6 +877,7 @@ func authorizeDriveOverCDP(
 	mainPageWS string,
 	email string,
 	exited *atomic.Bool,
+	detached bool,
 ) error {
 	driveCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
@@ -803,8 +901,11 @@ func authorizeDriveOverCDP(
 		if err := driveCtx.Err(); err != nil {
 			return fmt.Errorf("等待 Drive 授权弹窗超时: %w", err)
 		}
-		if exited.Load() {
-			return errors.New("浏览器窗口已关闭")
+		if !detached && exited.Load() {
+			if _, err := listCDPTargets(driveCtx, httpClient, debugPort); err != nil {
+				return errors.New("浏览器窗口已关闭")
+			}
+			detached = true
 		}
 		_ = cdpClickElement(driveCtx, mainPageWS, driveAccessButtonExpr)
 
@@ -841,16 +942,15 @@ func authorizeDriveOverCDP(
   return items.find(item => (item.getAttribute('data-email') || '').toLowerCase() === email) || (items.length === 1 ? items[0] : null);
 })(%s)`, string(emailJSON))
 
+	consecutiveDriveCDPErrors := 0
 	for {
 		if err := driveCtx.Err(); err != nil {
 			return fmt.Errorf("等待 Drive OAuth 弹窗完成超时: %w", err)
 		}
-		if exited.Load() {
-			return errors.New("浏览器窗口已关闭")
-		}
 		targets, err := listCDPTargets(driveCtx, httpClient, debugPort)
 		if err != nil {
-			if exited.Load() {
+			consecutiveDriveCDPErrors++
+			if (!detached && exited.Load()) || (detached && consecutiveDriveCDPErrors >= 3) {
 				return errors.New("浏览器窗口已关闭")
 			}
 			select {
@@ -859,6 +959,10 @@ func authorizeDriveOverCDP(
 			case <-time.After(450 * time.Millisecond):
 				continue
 			}
+		}
+		consecutiveDriveCDPErrors = 0
+		if !detached && exited.Load() {
+			detached = true
 		}
 		var currentPopup *cdpPageTarget
 		for i := range targets {

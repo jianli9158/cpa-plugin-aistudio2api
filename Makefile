@@ -1,6 +1,6 @@
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
-SPIDERMONKEY_VERSION ?= v152.0.4-aistudio2api.1
+SPIDERMONKEY_VERSION ?= v158.0.1-aistudio2api.1
 SPIDERMONKEY_DIR := $(CURDIR)/spidermonkey
 LIBWEBP_VERSION ?= v1.6.0-aistudio2api.1
 LIBWEBP_DIR := $(CURDIR)/libwebp

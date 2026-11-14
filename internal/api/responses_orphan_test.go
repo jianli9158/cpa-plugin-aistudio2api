@@ -10,7 +10,7 @@ func TestResponsesContents_OrphanToolOutputGracefulFallback(t *testing.T) {
 		{"type":"message","role":"user","content":"hello"},
 		{"type":"function_call_output","call_id":"call_orphan","output":"{\"result\":\"subagent task completed\"}"}
 	]`)
-	contents, _, err := responsesContents(input)
+	contents, _, err := responsesContents(splitResponsesInput(input))
 	if err != nil {
 		t.Fatalf("unexpected error parsing responses contents: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestResponsesContents_PairedFunctionCallWithID(t *testing.T) {
 		{"type":"function_call","id":"call_123","name":"exec_command","arguments":"{\"cmd\":\"dir\"}"},
 		{"type":"function_call_output","call_id":"call_123","output":"{\"result\":\"file.txt\"}"}
 	]`)
-	contents, _, err := responsesContents(input)
+	contents, _, err := responsesContents(splitResponsesInput(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestResponsesContents_OrphanToolOutputWithPendingSiblingCall(t *testing.T) 
 		{"type":"function_call_output","call_id":"call_orphan_other","output":"{\"result\":\"orphan result\"}"},
 		{"type":"function_call_output","call_id":"call_active","output":"{\"result\":\"ls output\"}"}
 	]`)
-	contents, _, err := responsesContents(input)
+	contents, _, err := responsesContents(splitResponsesInput(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

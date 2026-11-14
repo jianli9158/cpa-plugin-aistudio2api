@@ -16,7 +16,7 @@ permissions:
 
 env:
   PLUGIN_ID: aistudio2api
-  SPIDERMONKEY_TAG: v152.0.4-aistudio2api.1
+  SPIDERMONKEY_TAG: v158.0.1-aistudio2api.1
   LIBWEBP_TAG: v1.6.0-aistudio2api.1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 

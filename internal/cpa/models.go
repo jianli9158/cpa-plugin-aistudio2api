@@ -272,7 +272,7 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 		addModel(info)
 
 		// Register -search alias for models supporting Google Search grounding
-		if searchAliases && m.Capabilities["search"] && !strings.HasSuffix(info.ID, "-search") {
+		if searchAliases && m.Capabilities["search"] && !strings.HasSuffix(info.ID, "-search") && !m.Capabilities["assistant_route"] {
 			searchInfo := info
 			searchInfo.ID = info.ID + "-search"
 			searchInfo.DisplayName = info.DisplayName + " (Search)"
@@ -313,14 +313,34 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 	return out
 }
 
+func (p *Plugin) assistantModelsEnabled() bool {
+	if rt, err := p.Runtime(); err == nil && rt != nil && rt.Pool() != nil {
+		return rt.Pool().AssistantEnabled()
+	}
+	return boolOrDefault(p.Config().EnableAssistantModels, false)
+}
+
+func filterAssistantModels(models []aistudio.Model, allowAssistant bool) []aistudio.Model {
+	if allowAssistant {
+		return models
+	}
+	out := make([]aistudio.Model, 0, len(models))
+	for _, m := range models {
+		if m.Capabilities["assistant_route"] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
 func (p *Plugin) collectRawCatalogModels(accountID string) []aistudio.Model {
 	rt, err := p.Runtime()
 	if err == nil {
 		if accountID != "" {
 			if acc, ok := rt.Pool().AccountByID(accountID); ok && acc != nil && len(acc.Models) > 0 {
-				models := acc.Models
+				models := filterAssistantModels(acc.Models, p.assistantModelsEnabled())
 				if rt.Pool().BuildEnabled() {
-					if cached := rt.CachedModels(); len(cached) > 0 {
+					if cached := filterAssistantModels(rt.CachedModels(), p.assistantModelsEnabled()); len(cached) > 0 {
 						models = mergeRawModels(models, cached)
 					}
 				}
@@ -328,9 +348,9 @@ func (p *Plugin) collectRawCatalogModels(accountID string) []aistudio.Model {
 			}
 		}
 		if models, err := rt.Admin.CatalogModels(p.ctx); err == nil && len(models) > 0 {
-			return models
+			return filterAssistantModels(models, p.assistantModelsEnabled())
 		}
-		if cached := rt.CachedModels(); len(cached) > 0 {
+		if cached := filterAssistantModels(rt.CachedModels(), p.assistantModelsEnabled()); len(cached) > 0 {
 			return cached
 		}
 	}
@@ -390,6 +410,11 @@ func convertAIStudioModel(m aistudio.Model) pluginapi.ModelInfo {
 		outputModalities = []string{"video"}
 	}
 
+	desc := cleanAIStudioDescription(id, m.Description)
+	if m.Capabilities["assistant_route"] {
+		desc = "[⚠️ 高风控 Build 写代码助手通道 — 仅建议在测试账号开启] " + desc
+	}
+
 	return pluginapi.ModelInfo{
 		ID:                         id,
 		Object:                     "model",
@@ -398,7 +423,7 @@ func convertAIStudioModel(m aistudio.Model) pluginapi.ModelInfo {
 		DisplayName:                displayName,
 		Name:                       "models/" + id,
 		Version:                    m.Version,
-		Description:                cleanAIStudioDescription(id, m.Description),
+		Description:                desc,
 		InputTokenLimit:            inLimit,
 		OutputTokenLimit:           outLimit,
 		ContextLength:              inLimit,

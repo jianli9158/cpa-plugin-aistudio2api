@@ -205,6 +205,7 @@ func (rt *PluginRuntime) ApplyLiveConfig(cfg config.Config) {
 			ts.pool.SetUpstreamChannels(upstreamChannels(cfg.UpstreamChannels))
 			ts.pool.SetModelChannels(modelChannels(cfg.ModelChannels))
 			ts.pool.SetModelAccounts(modelAccounts(cfg.ModelAccounts))
+			ts.pool.SetAssistantEnabled(cfg.EnableAssistantModels)
 		}
 	}
 }
