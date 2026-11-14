@@ -129,9 +129,14 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 		accountID = strings.ToLower(strings.TrimSpace(payload.Label))
 	}
 
+	serviceStopped := p.serviceStopped.Load()
+	inStartupWindow := false
+	if regNs := p.lastRegisterNs.Load(); regNs > 0 && time.Since(time.Unix(0, regNs)) < 15*time.Second {
+		inStartupWindow = true
+	}
+
 	prevDisabled := payload.Disabled
 	prevServiceStopped := payload.ServiceStopped
-
 	state, hasState := extractStorageStateFromPayload(rawJSON, payload)
 	rt, rtErr := p.Runtime()
 	var imported api.AdminAccount
@@ -155,12 +160,6 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 		if strings.Contains(base, "@") {
 			accountID = strings.ToLower(strings.TrimSpace(base))
 		}
-	}
-
-	serviceStopped := p.serviceStopped.Load()
-	inStartupWindow := false
-	if regNs := p.lastRegisterNs.Load(); regNs > 0 && time.Since(time.Unix(0, regNs)) < 5*time.Second {
-		inStartupWindow = true
 	}
 
 	disabled := false
