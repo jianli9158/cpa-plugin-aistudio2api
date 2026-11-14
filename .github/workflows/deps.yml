@@ -297,29 +297,41 @@ jobs:
             make m4 pkg-config cmake ninja-build \
             python3 python3-venv python3-pip zip xz-utils binutils
           if apt-cache show clang-20 >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends clang-20 lld-20 llvm-20
+            sudo apt-get install -y --no-install-recommends clang-20 lld-20 llvm-20 libclang-20-dev
             echo "HOST_CC_BIN=/usr/bin/clang-20" >> "$GITHUB_ENV"
             echo "HOST_CXX_BIN=/usr/bin/clang++-20" >> "$GITHUB_ENV"
             echo "LLVM_AR_BIN=/usr/bin/llvm-ar-20" >> "$GITHUB_ENV"
             echo "LLVM_RANLIB_BIN=/usr/bin/llvm-ranlib-20" >> "$GITHUB_ENV"
             echo "LLVM_NM_BIN=/usr/bin/llvm-nm-20" >> "$GITHUB_ENV"
             echo "LLVM_STRIP_BIN=/usr/bin/llvm-strip-20" >> "$GITHUB_ENV"
+            echo "LLVM_LIB_DIR=/usr/lib/llvm-20/lib" >> "$GITHUB_ENV"
           else
-            sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19
+            sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19 libclang-19-dev
             echo "HOST_CC_BIN=/usr/bin/clang-19" >> "$GITHUB_ENV"
             echo "HOST_CXX_BIN=/usr/bin/clang++-19" >> "$GITHUB_ENV"
             echo "LLVM_AR_BIN=/usr/bin/llvm-ar-19" >> "$GITHUB_ENV"
             echo "LLVM_RANLIB_BIN=/usr/bin/llvm-ranlib-19" >> "$GITHUB_ENV"
             echo "LLVM_NM_BIN=/usr/bin/llvm-nm-19" >> "$GITHUB_ENV"
             echo "LLVM_STRIP_BIN=/usr/bin/llvm-strip-19" >> "$GITHUB_ENV"
+            echo "LLVM_LIB_DIR=/usr/lib/llvm-19/lib" >> "$GITHUB_ENV"
           fi
           mkdir -p "$RUNNER_TEMP/zig-bin"
           cat > "$RUNNER_TEMP/zig-bin/zig-cc" <<'EOF'
           #!/bin/sh
+          for arg in "$@"; do
+            case "$arg" in
+              -print-*|--print-*) exec zig cc "$@" ;;
+            esac
+          done
           exec zig cc -target x86_64-linux-gnu.2.28 "$@"
           EOF
           cat > "$RUNNER_TEMP/zig-bin/zig-cxx" <<'EOF'
           #!/bin/sh
+          for arg in "$@"; do
+            case "$arg" in
+              -print-*|--print-*) exec zig c++ "$@" ;;
+            esac
+          done
           exec zig c++ -target x86_64-linux-gnu.2.28 "$@"
           EOF
           chmod +x "$RUNNER_TEMP/zig-bin/zig-cc" "$RUNNER_TEMP/zig-bin/zig-cxx"
@@ -397,6 +409,7 @@ jobs:
           ac_add_options --disable-js-shell
           ac_add_options --disable-tests
           ac_add_options --disable-jemalloc
+          ac_add_options --with-libclang-path=${LLVM_LIB_DIR}
           export HOST_CC=${HOST_CC_BIN}
           export HOST_CXX=${HOST_CXX_BIN}
           export CC=${ZIG_BIN}/zig-cc
