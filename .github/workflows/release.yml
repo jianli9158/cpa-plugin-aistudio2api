@@ -42,7 +42,7 @@ jobs:
             goarch: amd64
             os: ubuntu-24.04
             ext: .so
-            sm_platform: linux-amd64-gnu
+            sm_platform: linux-amd64-glibc228
           - goos: linux
             goarch: arm64
             os: ubuntu-24.04
@@ -69,8 +69,8 @@ jobs:
           go-version: stable
           check-latest: true
 
-      - name: Setup Zig 0.16.0 (Linux arm64 target)
-        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+      - name: Setup Zig 0.16.0 (Linux targets)
+        if: matrix.goos == 'linux'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -93,9 +93,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p spidermonkey libwebp
-          if [ "${{ matrix.sm_platform }}" = "windows-arm64" ]; then
-            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/deps-v1/spidermonkey-${SPIDERMONKEY_TAG}-windows-arm64.tar.gz" | tar -xz -C spidermonkey
-            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/deps-v1/libwebp-${LIBWEBP_TAG}-windows-arm64.tar.gz" | tar -xz -C libwebp
+          if [ "${{ matrix.sm_platform }}" = "windows-arm64" ] || [ "${{ matrix.sm_platform }}" = "linux-amd64-glibc228" ]; then
+            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/deps-v1/spidermonkey-${SPIDERMONKEY_TAG}-${{ matrix.sm_platform }}.tar.gz" | tar -xz -C spidermonkey
+            curl -fsSL "https://github.com/${{ github.repository }}/releases/download/deps-v1/libwebp-${LIBWEBP_TAG}-${{ matrix.sm_platform }}.tar.gz" | tar -xz -C libwebp
           else
             curl -fsSL "https://github.com/Mag1cFall/firefox/releases/download/${SPIDERMONKEY_TAG}/spidermonkey-${SPIDERMONKEY_TAG}-${{ matrix.sm_platform }}.tar.gz" | tar -xz -C spidermonkey
             curl -fsSL "https://github.com/Mag1cFall/libwebp/releases/download/${LIBWEBP_TAG}/libwebp-${LIBWEBP_TAG}-${{ matrix.sm_platform }}.tar.gz" | tar -xz -C libwebp
@@ -116,9 +116,12 @@ jobs:
           export CGO_ENABLED=1
           export CGO_CPPFLAGS="-I${PWD}/spidermonkey/include -I${PWD}/libwebp/include"
           export CGO_LDFLAGS="-L${PWD}/spidermonkey/lib -L${PWD}/libwebp/lib"
+          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "amd64" ]; then
+            export CC="zig cc -target x86_64-linux-gnu.2.28"
+            export CXX="zig c++ -target x86_64-linux-gnu.2.28"
+          fi
           go vet ./...
           go test ./internal/aistudio ./internal/api ./internal/config ./internal/cpa ./internal/imagecodec/... ./internal/proxydial ./internal/resample ./internal/waa
-
       - name: Build Dynamic Library & Package Zip
         shell: bash
         run: |
@@ -136,11 +139,25 @@ jobs:
             export CGO_CXXFLAGS="-O2 -mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
             export CGO_LDFLAGS="${CGO_LDFLAGS} -mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
           fi
-          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
-            export CC="zig cc -target aarch64-linux-gnu"
-            export CXX="zig c++ -target aarch64-linux-gnu"
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            if [ "${{ matrix.goarch }}" = "amd64" ]; then
+              export CC="zig cc -target x86_64-linux-gnu.2.28"
+              export CXX="zig c++ -target x86_64-linux-gnu.2.28"
+            elif [ "${{ matrix.goarch }}" = "arm64" ]; then
+              export CC="zig cc -target aarch64-linux-gnu.2.28"
+              export CXX="zig c++ -target aarch64-linux-gnu.2.28"
+            fi
           fi
           go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o "out/${LIB_NAME}" ./cmd/aistudio2api-plugin
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            readelf -d "out/${LIB_NAME}" | grep NEEDED
+            BAD_GLIBC=$(readelf -V "out/${LIB_NAME}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -u | awk -F_ '{
+              split($2, a, ".");
+              if ((a[1]+0) > 2 || ((a[1]+0) == 2 && (a[2]+0) > 28)) print $0
+            }')
+            echo "BAD_GLIBC=${BAD_GLIBC:-none}"
+            test -z "$BAD_GLIBC"
+          fi
           (cd out && zip -qr "../${ZIP_NAME}" "${LIB_NAME}")
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

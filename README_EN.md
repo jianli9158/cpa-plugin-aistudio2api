@@ -65,16 +65,21 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases):
-   - macOS Apple Silicon: `aistudio2api_1.2.5_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.5_darwin_amd64.zip`
-   - Linux x86_64: `aistudio2api_1.2.5_linux_amd64.zip`
-   - Linux ARM64: `aistudio2api_1.2.5_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.5_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.5_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.6_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.6_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.6_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.6_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.6_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.6_windows_arm64.zip`
 2. Extract the dynamic library (`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
    ```
+
+> [!NOTE]
+> **Linux Runtime Compatibility (`glibc 2.28+` starting in `v1.2.6`)**  
+> Prebuilt `linux_amd64` and `linux_arm64` `.so` libraries are compiled via Zig targeting `glibc 2.28` with C++ runtime statically linked, supporting the official `eceasy/cli-proxy-api` Docker image (Debian 12 / glibc 2.36), Debian 10+, Ubuntu 20.04/22.04/24.04, and RHEL/AlmaLinux/Rocky 8+ out of the box via the Plugin Store.  
+> Alpine (`musl`) containers are not supported because the host CLIProxyAPI binary loads plugins via glibc `dlopen`.
 
 ### Option 3: Build from Source
 #### Prerequisites

@@ -65,16 +65,21 @@ flowchart LR
 
 ### 方式二：从 GitHub Releases 下载预编译包
 1. 前往 [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases) 下载对应平台的压缩包：
-   - macOS Apple Silicon: `aistudio2api_1.2.5_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.5_darwin_amd64.zip`
-   - Linux x86_64: `aistudio2api_1.2.5_linux_amd64.zip`
-   - Linux ARM64: `aistudio2api_1.2.5_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.5_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.5_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.6_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.6_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.6_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.6_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.6_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.6_windows_arm64.zip`
 2. 解压出动态库文件（`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`），放入 CLIProxyAPI 的插件目录：
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
    ```
+
+> [!NOTE]
+> **Linux 运行环境要求（`v1.2.6` 起内置 `glibc 2.28+` 兼容构建）**  
+> `linux_amd64` 与 `linux_arm64` 预编译 `.so` 均已通过 Zig `glibc 2.28` 工具链静态打包 C++ 运行时并锁定符号版本上限 `<= GLIBC_2.28`，可直接在官方 `eceasy/cli-proxy-api` Docker 镜像（Debian 12 / glibc 2.36）、Debian 10+、Ubuntu 20.04/22.04/24.04 及 RHEL/AlmaLinux/Rocky 8+ 上通过插件商店开箱加载。  
+> 由于 CLIProxyAPI 宿主二进制通过系统 glibc 执行 `dlopen`，不支持 Alpine (musl) 基础镜像。
 
 ### 方式三：从源码构建
 #### 环境要求
