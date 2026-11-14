@@ -1,4 +1,4 @@
-name: Build Static Dependencies (Windows arm64)
+name: Build Static Dependencies
 
 on:
   workflow_dispatch:
@@ -7,6 +7,15 @@ on:
         description: "Prerelease tag for hosting prebuilt static archives"
         required: true
         default: "deps-v1"
+      target:
+        description: "Which static dependency target to build"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - windows-arm64
+          - linux-amd64-glibc228
 
 permissions:
   contents: write
@@ -15,10 +24,12 @@ env:
   SPIDERMONKEY_TAG: v158.0.1-aistudio2api.1
   LIBWEBP_TAG: v1.6.0-aistudio2api.1
   LLVM_MINGW_VER: "20261020"
+  ZIG_VER: "0.16.0"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-windows-arm64:
+    if: ${{ inputs.target == 'all' || inputs.target == 'windows-arm64' }}
     name: Build SpiderMonkey & libwebp (windows-arm64)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -261,5 +272,261 @@ jobs:
           gh release upload "$TAG" \
             "spidermonkey-${SPIDERMONKEY_TAG}-windows-arm64.tar.gz" \
             "libwebp-${LIBWEBP_TAG}-windows-arm64.tar.gz" \
+            --clobber \
+            --repo "${{ github.repository }}"
+
+  build-linux-amd64-glibc228:
+    if: ${{ inputs.target == 'all' || inputs.target == 'linux-amd64-glibc228' }}
+    name: Build SpiderMonkey & libwebp (linux-amd64-glibc228)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout Plugin Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Zig (${{ env.ZIG_VER }})
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VER }}
+
+      - name: Install Host Build Tools & Zig Wrappers
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make m4 pkg-config cmake ninja-build \
+            python3 python3-venv python3-pip zip xz-utils binutils
+          if apt-cache show clang-20 >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends clang-20 lld-20 llvm-20
+            echo "HOST_CC_BIN=/usr/bin/clang-20" >> "$GITHUB_ENV"
+            echo "HOST_CXX_BIN=/usr/bin/clang++-20" >> "$GITHUB_ENV"
+            echo "LLVM_AR_BIN=/usr/bin/llvm-ar-20" >> "$GITHUB_ENV"
+            echo "LLVM_RANLIB_BIN=/usr/bin/llvm-ranlib-20" >> "$GITHUB_ENV"
+            echo "LLVM_NM_BIN=/usr/bin/llvm-nm-20" >> "$GITHUB_ENV"
+            echo "LLVM_STRIP_BIN=/usr/bin/llvm-strip-20" >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y --no-install-recommends clang-19 lld-19 llvm-19
+            echo "HOST_CC_BIN=/usr/bin/clang-19" >> "$GITHUB_ENV"
+            echo "HOST_CXX_BIN=/usr/bin/clang++-19" >> "$GITHUB_ENV"
+            echo "LLVM_AR_BIN=/usr/bin/llvm-ar-19" >> "$GITHUB_ENV"
+            echo "LLVM_RANLIB_BIN=/usr/bin/llvm-ranlib-19" >> "$GITHUB_ENV"
+            echo "LLVM_NM_BIN=/usr/bin/llvm-nm-19" >> "$GITHUB_ENV"
+            echo "LLVM_STRIP_BIN=/usr/bin/llvm-strip-19" >> "$GITHUB_ENV"
+          fi
+          mkdir -p "$RUNNER_TEMP/zig-bin"
+          cat > "$RUNNER_TEMP/zig-bin/zig-cc" <<'EOF'
+          #!/bin/sh
+          exec zig cc -target x86_64-linux-gnu.2.28 "$@"
+          EOF
+          cat > "$RUNNER_TEMP/zig-bin/zig-cxx" <<'EOF'
+          #!/bin/sh
+          exec zig c++ -target x86_64-linux-gnu.2.28 "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/zig-bin/zig-cc" "$RUNNER_TEMP/zig-bin/zig-cxx"
+          echo "ZIG_BIN=$RUNNER_TEMP/zig-bin" >> "$GITHUB_ENV"
+          sudo curl -fsSL "https://github.com/mozilla/cbindgen/releases/download/0.29.4/cbindgen-ubuntu22.04" -o /usr/local/bin/cbindgen
+          sudo chmod +x /usr/local/bin/cbindgen
+          echo "CBINDGEN=/usr/local/bin/cbindgen" >> "$GITHUB_ENV"
+          zig version
+          rustc --version
+          cargo --version
+          /usr/local/bin/cbindgen --version
+
+      - name: Build libwebp (linux-amd64-glibc228)
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/src-webp" "$RUNNER_TEMP/out-webp"
+          curl -fsSL "https://github.com/Mag1cFall/libwebp/archive/refs/tags/${LIBWEBP_TAG}.tar.gz" | tar -xz --strip-components=1 -C "$RUNNER_TEMP/src-webp"
+          cmake -S "$RUNNER_TEMP/src-webp" -B "$RUNNER_TEMP/build-webp" -G Ninja \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+            -DCMAKE_C_COMPILER="${ZIG_BIN}/zig-cc" \
+            -DCMAKE_AR="${LLVM_AR_BIN}" \
+            -DCMAKE_RANLIB="${LLVM_RANLIB_BIN}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DWEBP_BUILD_ANIM_UTILS=OFF \
+            -DWEBP_BUILD_CWEBP=OFF \
+            -DWEBP_BUILD_DWEBP=OFF \
+            -DWEBP_BUILD_GIF2WEBP=OFF \
+            -DWEBP_BUILD_IMG2WEBP=OFF \
+            -DWEBP_BUILD_VWEBP=OFF \
+            -DWEBP_BUILD_WEBPINFO=OFF \
+            -DWEBP_BUILD_WEBPMUX=OFF \
+            -DWEBP_BUILD_EXTRAS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/install-webp"
+          cmake --build "$RUNNER_TEMP/build-webp" -j"$(nproc)"
+          cmake --install "$RUNNER_TEMP/build-webp"
+          mkdir -p "$RUNNER_TEMP/out-webp/include" "$RUNNER_TEMP/out-webp/lib"
+          cp -R "$RUNNER_TEMP/install-webp/include/webp" "$RUNNER_TEMP/out-webp/include/"
+          cp "$RUNNER_TEMP/install-webp/lib/libwebp.a" "$RUNNER_TEMP/out-webp/lib/"
+          cp "$RUNNER_TEMP/install-webp/lib/libsharpyuv.a" "$RUNNER_TEMP/out-webp/lib/"
+          tar -czf "${PWD}/libwebp-${LIBWEBP_TAG}-linux-amd64-glibc228.tar.gz" -C "$RUNNER_TEMP/out-webp" include lib
+          ls -lh "${PWD}/libwebp-${LIBWEBP_TAG}-linux-amd64-glibc228.tar.gz"
+
+      - name: Build SpiderMonkey (linux-amd64-glibc228)
+        shell: bash
+        run: |
+          FF_SRC="$RUNNER_TEMP/firefox-src"
+          mkdir -p "$FF_SRC"
+          curl -fsSL "https://github.com/Mag1cFall/firefox/archive/refs/tags/${SPIDERMONKEY_TAG}.tar.gz" | tar -xz --strip-components=1 -C "$FF_SRC"
+
+          python3 - "$FF_SRC" <<'PY'
+          import pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          js_mozbuild = root / "js/src/moz.build"
+          mbtext = js_mozbuild.read_text(encoding="utf-8")
+          old_mb = 'if not CONFIG["JS_DISABLE_SHELL"]:\n    DIRS += [\n        "rust",\n        "shell",\n    ]'
+          new_mb = 'DIRS += ["rust"]\nif not CONFIG["JS_DISABLE_SHELL"]:\n    DIRS += [\n        "shell",\n    ]'
+          assert old_mb in mbtext, "js/src/moz.build DIRS block not found"
+          js_mozbuild.write_text(mbtext.replace(old_mb, new_mb, 1), encoding="utf-8")
+          print("Patched js/src/moz.build to build rust crate with --disable-js-shell")
+          PY
+
+          OBJDIR="$RUNNER_TEMP/sm-obj"
+          cat > "$FF_SRC/mozconfig" <<EOF
+          mk_add_options MOZ_OBJDIR=${OBJDIR}
+          ac_add_options --enable-application=js
+          ac_add_options --target=x86_64-pc-linux-gnu
+          ac_add_options --enable-release
+          ac_add_options --enable-optimize
+          ac_add_options --disable-debug
+          ac_add_options --disable-debug-symbols
+          ac_add_options --disable-shared-js
+          ac_add_options --disable-js-shell
+          ac_add_options --disable-tests
+          ac_add_options --disable-jemalloc
+          export HOST_CC=${HOST_CC_BIN}
+          export HOST_CXX=${HOST_CXX_BIN}
+          export CC=${ZIG_BIN}/zig-cc
+          export CXX=${ZIG_BIN}/zig-cxx
+          export AR=${LLVM_AR_BIN}
+          export RANLIB=${LLVM_RANLIB_BIN}
+          export NM=${LLVM_NM_BIN}
+          export STRIP=${LLVM_STRIP_BIN}
+          EOF
+
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${ZIG_BIN}/zig-cc"
+          export MOZBUILD_STATE_PATH="$RUNNER_TEMP/mozbuild"
+          export MACH_BUILD_PYTHON_NATIVE_PACKAGE_SOURCE=none
+          mkdir -p "$MOZBUILD_STATE_PATH"
+          (
+            cd "$FF_SRC"
+            ./mach --no-interactive configure
+            ./mach --no-interactive build -j"$(nproc)"
+          )
+
+          SM_OUT="$RUNNER_TEMP/out-sm"
+          mkdir -p "$SM_OUT/include" "$SM_OUT/lib"
+          cp -RL "$OBJDIR/dist/include/." "$SM_OUT/include/"
+          JS_STATIC=$(find "$OBJDIR" -type f -name "libjs_static.a" | head -n 1)
+          JS_RUST=$(find "$OBJDIR" -path "*/release/*" -type f -name "libjsrust.a" | head -n 1)
+          echo "Found JS_STATIC=$JS_STATIC JS_RUST=$JS_RUST"
+          test -n "$JS_STATIC" && test -n "$JS_RUST"
+          cp "$JS_STATIC" "$SM_OUT/lib/libjs_static.a"
+          cp "$JS_RUST" "$SM_OUT/lib/libjsrust.a"
+          "${LLVM_STRIP_BIN}" --strip-debug "$SM_OUT/lib/libjs_static.a" "$SM_OUT/lib/libjsrust.a" || true
+          tar -czf "${PWD}/spidermonkey-${SPIDERMONKEY_TAG}-linux-amd64-glibc228.tar.gz" -C "$SM_OUT" include lib
+          ls -lh "${PWD}/spidermonkey-${SPIDERMONKEY_TAG}-linux-amd64-glibc228.tar.gz"
+          rm -rf "$FF_SRC" "$OBJDIR"
+
+      - name: Setup Go & Smoke-Link Linux amd64 (glibc 2.28) Plugin SO
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Verify CGO Build, GLIBC <= 2.28 & Debian 12 Bookworm dlopen
+        shell: bash
+        run: |
+          export CGO_ENABLED=1
+          export GOOS=linux
+          export GOARCH=amd64
+          export CC="zig cc -target x86_64-linux-gnu.2.28"
+          export CXX="zig c++ -target x86_64-linux-gnu.2.28"
+          export CGO_CPPFLAGS="-I${RUNNER_TEMP}/out-sm/include -I${RUNNER_TEMP}/out-webp/include"
+          export CGO_LDFLAGS="-L${RUNNER_TEMP}/out-sm/lib -L${RUNNER_TEMP}/out-webp/lib"
+          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o "$RUNNER_TEMP/aistudio2api.so" ./cmd/aistudio2api-plugin
+          file "$RUNNER_TEMP/aistudio2api.so"
+          ls -lh "$RUNNER_TEMP/aistudio2api.so"
+          readelf -d "$RUNNER_TEMP/aistudio2api.so" | grep NEEDED
+          BAD_GLIBC=$(readelf -V "$RUNNER_TEMP/aistudio2api.so" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -u | awk -F_ '{
+            split($2, a, ".");
+            if ((a[1]+0) > 2 || ((a[1]+0) == 2 && (a[2]+0) > 28)) print $0
+          }')
+          echo "BAD_GLIBC=${BAD_GLIBC:-none}"
+          test -z "$BAD_GLIBC"
+          cat > "$RUNNER_TEMP/smoke_dlopen.c" <<'EOF'
+          #include <dlfcn.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          typedef struct { void* ptr; size_t len; } cliproxy_buffer;
+          typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
+          typedef void (*cliproxy_host_free_fn)(void*, size_t);
+          typedef struct { uint32_t abi_version; void* host_ctx; cliproxy_host_call_fn call; cliproxy_host_free_fn free_buffer; } cliproxy_host_api;
+          typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
+          typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
+          typedef void (*cliproxy_plugin_shutdown_fn)(void);
+          typedef struct { uint32_t abi_version; cliproxy_plugin_call_fn call; cliproxy_plugin_free_fn free_buffer; cliproxy_plugin_shutdown_fn shutdown; } cliproxy_plugin_api;
+          typedef int (*cliproxy_plugin_init_fn)(const cliproxy_host_api*, cliproxy_plugin_api*);
+          static int mock_host_call(void* ctx, const char* method, const uint8_t* req, size_t req_len, cliproxy_buffer* resp) {
+              const char* ok = "{\"ok\":true,\"result\":{}}";
+              size_t n = strlen(ok);
+              resp->ptr = malloc(n);
+              memcpy(resp->ptr, ok, n);
+              resp->len = n;
+              return 0;
+          }
+          static void mock_host_free(void* ptr, size_t len) { if (ptr) free(ptr); }
+          int main(int argc, char **argv) {
+              void *h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+              if (!h) { fprintf(stderr, "dlopen failed: %s\n", dlerror()); return 1; }
+              cliproxy_plugin_init_fn init_fn = (cliproxy_plugin_init_fn)dlsym(h, "cliproxyPluginInit");
+              if (!init_fn) { fprintf(stderr, "dlsym cliproxyPluginInit failed\n"); return 2; }
+              cliproxy_host_api host = { .abi_version = 1, .host_ctx = NULL, .call = mock_host_call, .free_buffer = mock_host_free };
+              cliproxy_plugin_api plugin = {0};
+              if (init_fn(&host, &plugin) != 0) { fprintf(stderr, "cliproxyPluginInit failed\n"); return 3; }
+              const char* payload = "{\"schema_version\":10,\"config_yaml\":\"ZGF0YV9kaXI6IC90bXAvYWlzdHVkaW8yYXBpCmF1dG9fc3RhcnQ6IGZhbHNlCnN5bmNfYXV0aF9maWxlczogZmFsc2UK\"}";
+              cliproxy_buffer resp = {0};
+              char method[] = "plugin.register";
+              if (plugin.call(method, (uint8_t*)payload, strlen(payload), &resp) != 0 || !resp.ptr) {
+                  fprintf(stderr, "plugin.register failed\n");
+                  return 4;
+              }
+              printf("plugin.register: %.*s\n", (int)resp.len, (const char*)resp.ptr);
+              int ok = strstr((const char*)resp.ptr, "\"ok\":true") != NULL && strstr((const char*)resp.ptr, "\"Name\":\"aistudio2api\"") != NULL;
+              plugin.free_buffer(resp.ptr, resp.len);
+              plugin.shutdown();
+              return ok ? 0 : 5;
+          }
+          EOF
+          "$RUNNER_TEMP/zig-bin/zig-cc" "$RUNNER_TEMP/smoke_dlopen.c" -ldl -o "$RUNNER_TEMP/smoke_dlopen"
+          docker run --rm -v "$RUNNER_TEMP:/work" debian:bookworm bash -c '
+            ldd --version | head -n 1
+            ldd /work/aistudio2api.so
+            /work/smoke_dlopen /work/aistudio2api.so
+          '
+
+      - name: Upload Static Archives to Prerelease Tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ inputs.release_tag || 'deps-v1' }}"
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Prebuilt Static Libraries ($TAG)" \
+              --notes "Prebuilt static libraries (SpiderMonkey ${SPIDERMONKEY_TAG} & libwebp ${LIBWEBP_TAG})." \
+              --prerelease \
+              --latest=false \
+              --target "${{ github.sha }}" \
+              --repo "${{ github.repository }}"
+          fi
+          gh release upload "$TAG" \
+            "spidermonkey-${SPIDERMONKEY_TAG}-linux-amd64-glibc228.tar.gz" \
+            "libwebp-${LIBWEBP_TAG}-linux-amd64-glibc228.tar.gz" \
             --clobber \
             --repo "${{ github.repository }}"
