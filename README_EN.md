@@ -65,12 +65,12 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases):
-   - macOS Apple Silicon: `aistudio2api_1.2.6_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.6_darwin_amd64.zip`
-   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.6_linux_amd64.zip`
-   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.6_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.6_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.6_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.7_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.7_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.7_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.7_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.7_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.7_windows_arm64.zip`
 2. Extract the dynamic library (`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
@@ -137,6 +137,7 @@ plugins:
 | `model_aliases` | `string` | `""` | Comma-separated model aliases in `alias:target` or `alias=target` format (e.g. `my-argon:gemini-4-argon,my-flash:gemini-3.8-flash-preview`) |
 | `account_order` | `string` | `""` | Priority account order under `fill-first` routing strategy (comma- or space-separated account email IDs) |
 | `max_account_switches` | `int` | `3` | Maximum additional accounts to try per request on quota/transient errors (`0` disables account switching) |
+| `max_regenerations` | `int` | `3` | Maximum same-turn regenerations on abnormal finish (`MALFORMED_RESPONSE` / `MALFORMED_FUNCTION_CALL`), stream interruption, or trailing 5xx before any visible output (`0` disables retries) |
 | `discover_hidden_models` | `bool` | `false` | Probe and include unreleased hidden models from the AI Studio frontend bundle |
 | `model_accounts` | `string` | `""` | Comma-separated model-to-account bindings in `model:account1\|account2` format (e.g. `gemini-3.1-pro-preview:a@gmail.com\|b@gmail.com`) |
 | `upstream_channels` | `[]string` | `["playground"]` | Enabled upstream channels (defaults to `["playground"]`; set to `["playground", "build"]` to also enable Build proxy channel) |

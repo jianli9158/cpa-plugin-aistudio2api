@@ -44,6 +44,7 @@ var configKeys = [...]string{
 	"ROUTING_STRATEGY",
 	"ACCOUNT_ORDER",
 	"MAX_ACCOUNT_SWITCHES",
+	"MAX_REGENERATIONS",
 	"UPSTREAM_CHANNELS",
 	"MODEL_MAPPING",
 	"MODEL_CHANNELS",
@@ -98,6 +99,9 @@ const FirstEventHedgeAuto = "auto"
 // DefaultMaxAccountSwitches 是 MAX_ACCOUNT_SWITCHES 的默认值
 const DefaultMaxAccountSwitches = 3
 
+// DefaultMaxRegenerations 是 MAX_REGENERATIONS 的默认值
+const DefaultMaxRegenerations = 3
+
 // DefaultFirstEventHedgeModels 是 FIRST_EVENT_HEDGE_MODELS 的默认值
 const DefaultFirstEventHedgeModels = "gemini-4-argon"
 
@@ -148,6 +152,7 @@ type Config struct {
 	RoutingStrategy        string
 	AccountOrder           string
 	MaxAccountSwitches     int
+	MaxRegenerations       int
 	UpstreamChannels       []string
 	ModelMapping           string
 	ModelChannels          string
@@ -197,6 +202,7 @@ func Default() Config {
 		PerAccountConcurrency:  defaultAccountConcurrency,
 		RoutingStrategy:        "round-robin",
 		MaxAccountSwitches:     DefaultMaxAccountSwitches,
+		MaxRegenerations:       DefaultMaxRegenerations,
 		UpstreamChannels:       []string{"playground"},
 		WAABackend:             WAABackendSpiderMonkey,
 		MediaOutput:            MediaOutputInline,
@@ -244,6 +250,7 @@ var configSetters = map[string]func(*Config, string) error{
 	"WARM_STARTUP_CONCURRENCY": intSetter("WARM_STARTUP_CONCURRENCY", func(c *Config) *int { return &c.WarmStartupConcurrency }),
 	"PER_ACCOUNT_CONCURRENCY":  intSetter("PER_ACCOUNT_CONCURRENCY", func(c *Config) *int { return &c.PerAccountConcurrency }),
 	"MAX_ACCOUNT_SWITCHES":     setMaxAccountSwitches,
+	"MAX_REGENERATIONS":        setMaxRegenerations,
 	"INIT_TIMEOUT":             durationSetter("INIT_TIMEOUT", func(c *Config) *time.Duration { return &c.InitTimeout }),
 	"REQUEST_TIMEOUT":          durationSetter("REQUEST_TIMEOUT", func(c *Config) *time.Duration { return &c.RequestTimeout }),
 	"ADMIN_USERNAME":           textSetter(func(c *Config) *string { return &c.AdminUsername }, strings.TrimSpace),
@@ -328,6 +335,19 @@ func setMaxAccountSwitches(c *Config, value string) error {
 	return nil
 }
 
+// errMaxRegenerations 是 MAX_REGENERATIONS 取值无效的原因
+var errMaxRegenerations = fmt.Errorf("MAX_REGENERATIONS 必须是 0 或正整数")
+
+// setMaxRegenerations 设置异常结束、流中断或流尾 5xx 时的重新生成次数上限，0 表示不重新生成
+func setMaxRegenerations(c *Config, value string) error {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return errMaxRegenerations
+	}
+	c.MaxRegenerations = parsed
+	return nil
+}
+
 // setWAABackend 设置 WAA 后端，camoufox 以外的取值都使用 spidermonkey
 func setWAABackend(c *Config, value string) error {
 	c.WAABackend = WAABackendSpiderMonkey
@@ -409,6 +429,12 @@ var configChecks = []configCheck{
 	{[]string{"MAX_ACCOUNT_SWITCHES"}, func(c Config) error {
 		if c.MaxAccountSwitches < 0 {
 			return errMaxAccountSwitches
+		}
+		return nil
+	}},
+	{[]string{"MAX_REGENERATIONS"}, func(c Config) error {
+		if c.MaxRegenerations < 0 {
+			return errMaxRegenerations
 		}
 		return nil
 	}},
@@ -630,6 +656,7 @@ func (c Config) envValues() map[string]string {
 		"ROUTING_STRATEGY":         c.RoutingStrategy,
 		"ACCOUNT_ORDER":            c.AccountOrder,
 		"MAX_ACCOUNT_SWITCHES":     strconv.Itoa(c.MaxAccountSwitches),
+		"MAX_REGENERATIONS":        strconv.Itoa(c.MaxRegenerations),
 		"UPSTREAM_CHANNELS":        strings.Join(c.UpstreamChannels, ","),
 		"MODEL_MAPPING":            c.ModelMapping,
 		"MODEL_CHANNELS":           c.ModelChannels,

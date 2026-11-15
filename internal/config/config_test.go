@@ -35,3 +35,36 @@ func TestParseFirstEventHedgeSupportsDurationStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxRegenerationsConfig(t *testing.T) {
+	cfg := Default()
+	if cfg.MaxRegenerations != DefaultMaxRegenerations {
+		t.Fatalf("Default().MaxRegenerations = %d, want %d", cfg.MaxRegenerations, DefaultMaxRegenerations)
+	}
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{
+		{"0", 0},
+		{"5", 5},
+	} {
+		c := Default()
+		if err := configSetters["MAX_REGENERATIONS"](&c, tc.raw); err != nil {
+			t.Fatalf("set MAX_REGENERATIONS=%q failed: %v", tc.raw, err)
+		}
+		if c.MaxRegenerations != tc.want {
+			t.Fatalf("MAX_REGENERATIONS=%q got %d, want %d", tc.raw, c.MaxRegenerations, tc.want)
+		}
+	}
+	cBad := Default()
+	if err := configSetters["MAX_REGENERATIONS"](&cBad, "abc"); err == nil {
+		t.Fatalf("expected error for non-integer MAX_REGENERATIONS, got nil")
+	}
+	cNeg := Default()
+	if err := configSetters["MAX_REGENERATIONS"](&cNeg, "-1"); err != nil {
+		t.Fatalf("unexpected setter error for -1: %v", err)
+	}
+	if err := cNeg.Validate(); err == nil {
+		t.Fatalf("expected Validate() error for MAX_REGENERATIONS=-1, got nil")
+	}
+}

@@ -184,8 +184,7 @@ func (p *Plugin) hasReadyAccount() bool {
 	if err != nil {
 		return false
 	}
-	_, eligible := rt.Pool().EnabledAccounts()
-	return eligible > 0
+	return len(rt.Pool().EnabledAccounts()) > 0
 }
 
 func (p *Plugin) isKnownModel(modelID string) bool {

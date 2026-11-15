@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,20 +38,49 @@ func NewNativeWorker(ctx context.Context, accountID string, options camoufoxnati
 	return NewSpiderMonkeyWorker(ctx, accountID, options)
 }
 
-// Prepare 生成 fresh proof 并写入请求指定的 WAA field，请求带 Proof 时写入该 proof
+
+// resultSubmitter 是像官网用户一样在函数调用块中粘贴函数结果并点击提交后取 proof 的 workerRuntime
+type resultSubmitter interface {
+	SubmitProof(ctx context.Context, digest, result string, rounds int) (string, error)
+}
+
+// submitRounds 返回提交函数结果时页面对话的轮数：GenerateContent 正文中除最后一个函数结果外的 user 轮次数
+func submitRounds(body []byte) int {
+	var fields []json.RawMessage
+	var contents [][]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || len(fields) < 2 || json.Unmarshal(fields[1], &contents) != nil {
+		return 1
+	}
+	rounds := 0
+	for _, content := range contents {
+		var role string
+		if len(content) > 1 && json.Unmarshal(content[1], &role) == nil && role == "user" {
+			rounds++
+		}
+	}
+	return max(rounds-1, 1)
+}
+
+// Prepare 生成 fresh proof 并写入请求指定的 WAA field，请求带 Proof 时写入该 proof；在页面界面运行的 GenerateContent 由页面应用取 proof，只返回公共协议头
 func (worker *NativeWorker) Prepare(ctx context.Context, request ProtectedRequest) (PreparedProtectedRequest, error) {
 	start, end, err := arrayElementSpan(request.Body, request.ProofField-1)
 	if err != nil {
 		return PreparedProtectedRequest{}, fmt.Errorf("受保护请求缺少 WAA field %d: %w", request.ProofField, err)
 	}
-	proof := request.Proof
+	proof, page := request.Proof, request.PagePrompt
 	var headers http.Header
 	if proof == "" {
 		gesture := ctx
 		if !strings.HasSuffix(request.URL, "/GenerateTitle") {
 			gesture = context.WithValue(ctx, userGestureKey{}, true)
 		}
-		proof, headers, err = worker.proofAndHeaders(gesture, proofDigest(request), request.PagePrompt, strings.HasSuffix(request.URL, "/GenerateContent") && request.PagePrompt != "")
+		_, rerun := ctx.Value(pageRerunKey{}).(int)
+		generate := strings.HasSuffix(request.URL, "/GenerateContent")
+		result, submit := "", false
+		if generate && request.PagePrompt == "" && !rerun {
+			result, submit = wireFunctionResult(request.Body)
+		}
+		proof, page, headers, err = worker.proofAndHeaders(gesture, proofDigest(request), request.PagePrompt, request.Body, generate && (request.PagePrompt != "" || rerun), result, submit)
 	} else {
 		headers, err = worker.current().ProtocolHeaders(ctx)
 	}
@@ -60,24 +90,27 @@ func (worker *NativeWorker) Prepare(ctx context.Context, request ProtectedReques
 	encoded, _ := json.Marshal(proof)
 	body := make([]byte, 0, len(request.Body)-(end-start)+len(encoded))
 	body = append(append(append(body, request.Body[:start]...), encoded...), request.Body[end:]...)
-	return PreparedProtectedRequest{Body: body, Headers: headers, Proof: proof}, nil
+	return PreparedProtectedRequest{Body: body, Headers: headers, Proof: proof, PagePrompt: page}, nil
 }
 
-// pageRunner 是写入提示词并点击 Run 后取 GenerateContent proof 的 workerRuntime
+// pageRunner 是按 GenerateContent 正文点击 Run 或 Rerun 后取 proof 的 workerRuntime，返回 proof 与粘贴进页面的提示词
 type pageRunner interface {
-	RunProof(context.Context, string, string) (string, error)
+	RunProof(ctx context.Context, digest, prompt string, body []byte) (string, string, error)
 }
 
-// proofAndHeaders 把 page 写入页面提示词后为 digest 生成 fresh proof，run 时写入后点击 Run，再取公共协议头
-func (worker *NativeWorker) proofAndHeaders(ctx context.Context, digest, page string, run bool) (string, http.Header, error) {
+// proofAndHeaders 把 page 写入页面提示词后为 digest 生成 fresh proof，run 时写入后点击 Run，submit 时在函数调用块中粘贴函数结果 result 后点击提交，再取公共协议头；返回 proof、页面输入框中的提示词（run 时为页面实际粘贴的文本）与协议头
+func (worker *NativeWorker) proofAndHeaders(ctx context.Context, digest, page string, body []byte, run bool, result string, submit bool) (string, string, http.Header, error) {
 	worker.operationMu.Lock()
 	defer worker.operationMu.Unlock()
 	worker.setPhase(WorkerBusy)
 	runtime := worker.current()
 	var proof string
 	var err error
+	submitter, submits := runtime.(resultSubmitter)
 	if runner, ok := runtime.(pageRunner); ok && run {
-		proof, err = runner.RunProof(ctx, digest, page)
+		proof, page, err = runner.RunProof(ctx, digest, page, body)
+	} else if submits && submit {
+		proof, err = submitter.SubmitProof(ctx, digest, result, submitRounds(body))
 	} else {
 		proof, err = runtime.Proof(ctx, digest, page)
 	}
@@ -91,10 +124,10 @@ func (worker *NativeWorker) proofAndHeaders(ctx context.Context, digest, page st
 		} else {
 			worker.setPhase(WorkerFailed)
 		}
-		return "", nil, err
+		return "", "", nil, err
 	}
 	worker.setPhase(WorkerReady)
-	return proof, headers, nil
+	return proof, page, headers, nil
 }
 
 // arrayElementSpan 返回紧凑 JSON 顶层数组第 index 个元素的字节范围
@@ -149,10 +182,13 @@ func arrayElementSpan(body []byte, index int) (int, int, error) {
 // pageCountTokensDelay 是官网页面在 GenerateContent 发出后统计用户轮次 token 的时延
 const pageCountTokensDelay = 2200 * time.Millisecond
 
-// SendProtected 经账户 WAA runtime 流式发送已准备的请求
+// pageSubmitCountDelay 是官网页面提交函数结果、发出 GenerateContent 后统计函数调用与函数结果两轮 token 的最短时延，实际另加不超过 150 ms 的随机值
+const pageSubmitCountDelay = 250 * time.Millisecond
+
+// SendProtected 经账户 WAA runtime 流式发送已准备的请求，响应带实际写入的 proof：Camoufox 后端未带 proof 的 GenerateContent 在页面界面运行，请求头、proof 与随后的 CountTokens 都由页面应用产生；其余 GenerateContent 带官网点击运行时的 Priority: u=0，发出 pageCountTokensDelay 后由 runtime 以相同请求头统计页面提示词的 token
 func (worker *NativeWorker) SendProtected(ctx context.Context, request ProtectedRequest) (*RPCResponse, error) {
-	if body, ok := countTokensBody(request); ok {
-		ctx = withFollowUp(ctx, followUp{URL: makerSuiteRPCURL + "CountTokens", Body: body, Delay: pageCountTokensDelay})
+	if body, delay, ok := countTokensBody(request); ok {
+		ctx = withFollowUp(ctx, followUp{URL: makerSuiteRPCURL + "CountTokens", Body: body, Delay: delay})
 	}
 	headers := request.Headers
 	if strings.HasSuffix(request.URL, "/GenerateContent") {
@@ -178,18 +214,26 @@ func (worker *NativeWorker) SendProtected(ctx context.Context, request Protected
 	}, nil
 }
 
-// countTokensBody 按官网页面对用户轮次的统计，以 GenerateContent 的模型构造页面提示词的 CountTokens 正文；不是带页面提示词的 GenerateContent 时返回 false
-func countTokensBody(generate ProtectedRequest) ([]byte, bool) {
-	if !strings.HasSuffix(generate.URL, "/GenerateContent") || generate.PagePrompt == "" {
-		return nil, false
+// countTokensBody 按官网页面对用户轮次的统计，以 GenerateContent 的模型构造 CountTokens 正文并返回发出时延：带页面提示词时统计页面提示词，提交函数结果时统计最后的函数调用与函数结果两轮；都不是时返回 false
+func countTokensBody(generate ProtectedRequest) ([]byte, time.Duration, bool) {
+	if !strings.HasSuffix(generate.URL, "/GenerateContent") {
+		return nil, 0, false
 	}
 	var fields []json.RawMessage
 	var model string
-	if json.Unmarshal(generate.Body, &fields) != nil || len(fields) == 0 || json.Unmarshal(fields[0], &model) != nil {
-		return nil, false
+	if json.Unmarshal(generate.Body, &fields) != nil || len(fields) < 2 || json.Unmarshal(fields[0], &model) != nil {
+		return nil, 0, false
 	}
-	body, err := json.Marshal([]any{model, []any{[]any{[]any{[]any{nil, generate.PagePrompt}}, "user"}}})
-	return body, err == nil
+	if generate.PagePrompt != "" {
+		body, err := json.Marshal([]any{model, []any{[]any{[]any{[]any{nil, generate.PagePrompt}}, "user"}}})
+		return body, pageCountTokensDelay, err == nil
+	}
+	var contents []json.RawMessage
+	if _, result := wireFunctionResult(generate.Body); !result || json.Unmarshal(fields[1], &contents) != nil || len(contents) < 2 {
+		return nil, 0, false
+	}
+	body, err := json.Marshal([]any{model, contents[len(contents)-2:]})
+	return body, pageSubmitCountDelay + rand.N(150*time.Millisecond), err == nil
 }
 
 // BrowserStorageState 返回账户 WAA runtime 当前 Cookie 状态
@@ -263,6 +307,7 @@ func (worker *NativeWorker) State() WorkerState {
 func (worker *NativeWorker) Close() error {
 	worker.operationMu.Lock()
 	defer worker.operationMu.Unlock()
+	pageWorkers.CompareAndDelete(worker.accountID, worker)
 	worker.setPhase(WorkerClosing)
 	err := worker.current().Close()
 	if err == nil {

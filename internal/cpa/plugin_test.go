@@ -953,3 +953,66 @@ func TestAssistantModelsOptInGateAndLiveReload(t *testing.T) {
 		t.Fatalf("expected 2 pool status models after enable_assistant_models=true, got %+v", statuses)
 	}
 }
+
+func TestMaxRegenerationsConfigAndLiveReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	// 1. ParsePluginConfig supports top-level max_regenerations=0 and nested options, ignoring negative values.
+	_, cfgZero, err := cpa.ParsePluginConfig([]byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nmax_regenerations: 0\n"))
+	if err != nil {
+		t.Fatalf("ParsePluginConfig(0) failed: %v", err)
+	}
+	if cfgZero.MaxRegenerations != 0 {
+		t.Fatalf("expected MaxRegenerations=0, got %d", cfgZero.MaxRegenerations)
+	}
+
+	_, cfgNested, err := cpa.ParsePluginConfig([]byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\noptions:\n  max_regenerations: 5\n"))
+	if err != nil {
+		t.Fatalf("ParsePluginConfig(nested) failed: %v", err)
+	}
+	if cfgNested.MaxRegenerations != 5 {
+		t.Fatalf("expected nested options MaxRegenerations=5, got %d", cfgNested.MaxRegenerations)
+	}
+
+	_, cfgNeg, err := cpa.ParsePluginConfig([]byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nmax_regenerations: -1\n"))
+	if err != nil {
+		t.Fatalf("ParsePluginConfig(-1) failed: %v", err)
+	}
+	if cfgNeg.MaxRegenerations != 3 {
+		t.Fatalf("expected negative max_regenerations to keep default 3, got %d", cfgNeg.MaxRegenerations)
+	}
+
+	// 2. Plugin registration & reconfigure update live runtime MaxRegenerations.
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+	baseYAML := "data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\n"
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte(baseYAML + "max_regenerations: 0\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+	if got := rt.MaxRegenerations(); got != 0 {
+		t.Fatalf("expected initial live MaxRegenerations=0, got %d", got)
+	}
+
+	reconfReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte(baseYAML + "max_regenerations: 6\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginReconfigure, reconfReq); err != nil {
+		t.Fatalf("plugin.reconfigure failed: %v", err)
+	}
+	if got := rt.MaxRegenerations(); got != 6 {
+		t.Fatalf("expected live MaxRegenerations=6 after reconfigure, got %d", got)
+	}
+}

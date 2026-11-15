@@ -65,12 +65,12 @@ flowchart LR
 
 ### 方式二：从 GitHub Releases 下载预编译包
 1. 前往 [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases) 下载对应平台的压缩包：
-   - macOS Apple Silicon: `aistudio2api_1.2.6_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.6_darwin_amd64.zip`
-   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.6_linux_amd64.zip`
-   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.6_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.6_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.6_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.7_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.7_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.7_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.7_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.7_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.7_windows_arm64.zip`
 2. 解压出动态库文件（`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`），放入 CLIProxyAPI 的插件目录：
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
@@ -137,6 +137,7 @@ plugins:
 | `model_aliases` | `string` | `""` | 插件级模型别名映射，逗号分隔 `别名:原模型ID` 或 `别名=原模型ID`（如 `my-argon:gemini-4-argon,my-flash:gemini-3.8-flash-preview`） |
 | `account_order` | `string` | `""` | `fill-first` 策略下优先使用的账户顺序（逗号或空格分隔的账户邮箱 ID） |
 | `max_account_switches` | `int` | `3` | 单次请求因额度或临时故障最多切换的额外账户数（`0` 表示不切换账户） |
+| `max_regenerations` | `int` | `3` | 单轮在无可见输出前发生异常结束（如 `MALFORMED_RESPONSE` / `MALFORMED_FUNCTION_CALL`）、流中断或流尾 5xx 时同轮重新生成的最大次数（`0` 表示禁用重试） |
 | `discover_hidden_models` | `bool` | `false` | 是否从官网前端脚本探测并加入账户未公开的隐藏模型 |
 | `model_accounts` | `string` | `""` | 逗号分隔的模型绑定账户映射（格式 `模型ID:账户1\|账户2`，如 `gemini-3.1-pro-preview:a@gmail.com\|b@gmail.com`） |
 | `upstream_channels` | `[]string` | `["playground"]` | 启用的上游通道（默认 `["playground"]`，如需开启 Build 代理通道可设为 `["playground", "build"]`） |

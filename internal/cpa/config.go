@@ -14,7 +14,7 @@ import (
 
 const (
 	PluginID      = "aistudio2api"
-	PluginVersion = "1.2.6"
+	PluginVersion = "1.2.7"
 	ProviderID    = "aistudio2api"
 )
 
@@ -33,6 +33,7 @@ type PluginConfig struct {
 	RoutingStrategy        string        `json:"routing_strategy" yaml:"routing_strategy"`
 	AccountOrder           string        `json:"account_order" yaml:"account_order"`
 	MaxAccountSwitches     *int          `json:"max_account_switches" yaml:"max_account_switches"`
+	MaxRegenerations       *int          `json:"max_regenerations" yaml:"max_regenerations"`
 	ModelAccounts          string        `json:"model_accounts" yaml:"model_accounts"`
 	ModelAliases           string        `json:"model_aliases" yaml:"model_aliases"`
 	ModelMapping           string        `json:"model_mapping,omitempty" yaml:"model_mapping,omitempty"`
@@ -113,6 +114,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 			}
 			if pcfg.MaxAccountSwitches == nil {
 				pcfg.MaxAccountSwitches = opt.MaxAccountSwitches
+			}
+			if pcfg.MaxRegenerations == nil {
+				pcfg.MaxRegenerations = opt.MaxRegenerations
 			}
 			if pcfg.ModelAccounts == "" {
 				pcfg.ModelAccounts = opt.ModelAccounts
@@ -264,6 +268,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 	cfg.AccountOrder = strings.TrimSpace(pcfg.AccountOrder)
 	if pcfg.MaxAccountSwitches != nil && *pcfg.MaxAccountSwitches >= 0 {
 		cfg.MaxAccountSwitches = *pcfg.MaxAccountSwitches
+	}
+	if pcfg.MaxRegenerations != nil && *pcfg.MaxRegenerations >= 0 {
+		cfg.MaxRegenerations = *pcfg.MaxRegenerations
 	}
 	cfg.ModelAccounts = strings.TrimSpace(pcfg.ModelAccounts)
 	aliasesRaw := strings.TrimSpace(pcfg.ModelAliases)

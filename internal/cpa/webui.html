@@ -448,10 +448,11 @@
     font-variant-numeric: tabular-nums;
   }
   .log-line {
-    padding: 4px 0;
+    padding: 5px 0;
     border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
     display: flex;
-    gap: 8px;
+    flex-wrap: wrap;
+    gap: 6px 8px;
     align-items: baseline;
     line-height: 1.45;
   }
@@ -468,7 +469,34 @@
   .log-lvl.WARN { background: rgba(245, 158, 11, 0.18); color: #fcd34d; }
   .log-lvl.ERROR { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
   .log-src { color: #38bdf8; white-space: nowrap; font-size: 11px; }
-  .log-msg { color: var(--text-secondary); word-break: break-all; }
+  .log-msg { color: var(--text-secondary); word-break: break-word; }
+  .log-stage {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(168, 85, 247, 0.16);
+    color: #d8b4fe;
+    white-space: nowrap;
+  }
+  .log-stage.completed { background: rgba(16, 185, 129, 0.16); color: #6ee7b7; }
+  .log-stage.failed { background: rgba(239, 68, 68, 0.18); color: #fca5a5; }
+  .log-stage.cancelled { background: rgba(245, 158, 11, 0.16); color: #fcd34d; }
+  .log-fields {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    align-items: baseline;
+  }
+  .log-field {
+    font-size: 11px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--muted);
+    word-break: break-word;
+  }
+  .log-field-key { color: #94a3b8; }
+  .log-field-val { color: var(--text-secondary); }
 
   /* 悬浮毛玻璃 Toast（零页面抖动） */
   .toast {
@@ -1393,11 +1421,26 @@ async function loadLogs() {
     }
     box.innerHTML = logs.slice(-80).reverse().map(l => {
       const lvl = String(l.level || 'INFO').toUpperCase();
+      let stageHtml = '';
+      if (l.stage && l.stage.name) {
+        const st = l.stage;
+        const cls = st.state ? (' ' + escapeHtml(st.state)) : '';
+        const progress = (st.step > 0 && st.steps > 0) ? (' ' + st.step + '/' + st.steps) : '';
+        stageHtml = '<span class="log-stage' + cls + '">' + escapeHtml(st.name + progress) + '</span>';
+      }
+      let fieldsHtml = '';
+      if (Array.isArray(l.fields) && l.fields.length) {
+        fieldsHtml = '<span class="log-fields">' + l.fields.map(f =>
+          '<span class="log-field"><span class="log-field-key">' + escapeHtml(f.key) + '</span>=<span class="log-field-val">' + escapeHtml(f.value) + '</span></span>'
+        ).join('') + '</span>';
+      }
       return '<div class="log-line">' +
         '<span class="log-time">' + escapeHtml(formatLogTime(l.time)) + '</span>' +
         '<span class="log-lvl ' + escapeHtml(lvl) + '">' + escapeHtml(lvl) + '</span>' +
         '<span class="log-src">[' + escapeHtml(l.source || 'service') + ']</span>' +
+        stageHtml +
         '<span class="log-msg">' + escapeHtml(l.message || '') + '</span>' +
+        fieldsHtml +
       '</div>';
     }).join('');
   } catch (_) {}

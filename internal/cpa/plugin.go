@@ -313,6 +313,12 @@ func (p *Plugin) registrationPayload() rpcRegistration {
 					Description: "自动将导入的 AI Studio 账户凭据同步至 CLIProxyAPI 凭据目录",
 				},
 				{
+					Name:        "max_regenerations",
+					Type:        pluginapi.ConfigFieldTypeInteger,
+					Default:     3,
+					Description: "异常结束、流中断或流尾 5xx 时同轮重新生成的最大次数（0 表示禁用重试）",
+				},
+				{
 					Name:        "fake_stream",
 					Type:        pluginapi.ConfigFieldTypeBoolean,
 					Default:     false,

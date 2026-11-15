@@ -223,7 +223,7 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 	manager.finishStart(launchCancel)
 	if next != current {
 		if err := current.Close(); err != nil {
-			manager.requests.log("service", "WARN", "旧生成服务关闭失败 | 错误="+err.Error())
+			manager.requests.log("service", "WARN", "旧生成服务关闭失败", "error", err)
 		}
 	}
 	return status, startErr

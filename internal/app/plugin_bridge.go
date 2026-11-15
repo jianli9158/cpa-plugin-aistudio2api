@@ -152,6 +152,25 @@ func (rt *PluginRuntime) WarmWorkerTarget() int {
 	return ts.workers.PrewarmTarget()
 }
 
+// MaxRegenerations returns the active max_regenerations setting on the underlying PooledService or runtime config.
+func (rt *PluginRuntime) MaxRegenerations() int {
+	if rt == nil || rt.Manager == nil {
+		return config.DefaultMaxRegenerations
+	}
+	rt.Manager.mu.RLock()
+	cur := rt.Manager.current
+	fallback := rt.Config.MaxRegenerations
+	rt.Manager.mu.RUnlock()
+	if cur != nil {
+		if ts, ok := cur.service.(*trackedService); ok && ts != nil {
+			if pooled, ok := ts.service.(*aistudio.PooledService); ok && pooled != nil && pooled.MaxRegenerations != nil {
+				return *pooled.MaxRegenerations
+			}
+		}
+	}
+	return fallback
+}
+
 // ApplyLiveConfig applies updated routing, channel, capacity, hedge, and model mapping settings to an active PluginRuntime without dropping active requests or warm workers.
 func (rt *PluginRuntime) ApplyLiveConfig(cfg config.Config) {
 	if rt == nil || rt.Manager == nil {
@@ -198,6 +217,8 @@ func (rt *PluginRuntime) ApplyLiveConfig(cfg config.Config) {
 			pooled.StripThoughtSignatures = cfg.StripThoughtSignatures
 			pooled.ContinuationRewrite = cfg.ContinuationRewrite
 			pooled.ContinuationPrompt = cfg.ContinuationPrompt
+			maxRegenerations := cfg.MaxRegenerations
+			pooled.MaxRegenerations = &maxRegenerations
 		}
 		if ts.pool != nil {
 			ts.pool.SetRoutingStrategy(cfg.RoutingStrategy)
@@ -220,7 +241,7 @@ func (rt *PluginRuntime) EnsureRunning(ctx context.Context) error {
 		return nil
 	}
 	if pool := rt.Pool(); pool != nil {
-		if _, eligible := pool.EnabledAccounts(); eligible == 0 {
+		if len(pool.EnabledAccounts()) == 0 {
 			return aistudio.ErrNoEligibleAccount
 		}
 	}

@@ -20,6 +20,19 @@ type upstreamModeContextKey struct{}
 
 type continuationContextKey struct{}
 
+type regenerationContextKey struct{}
+
+// ContextWithRegenerationObserver 在异常结束、流中断或流尾 5xx 触发重新生成时调用 observer
+func ContextWithRegenerationObserver(ctx context.Context, observer func(attempt, max int, reason string)) context.Context {
+	return context.WithValue(ctx, regenerationContextKey{}, observer)
+}
+
+func reportRegeneration(ctx context.Context, attempt, max int, reason string) {
+	if observer, ok := ctx.Value(regenerationContextKey{}).(func(int, int, string)); ok {
+		observer(attempt, max, reason)
+	}
+}
+
 // ContextWithContinuationObserver 在自动续写开始新一轮时调用 observer
 func ContextWithContinuationObserver(ctx context.Context, observer func()) context.Context {
 	return context.WithValue(ctx, continuationContextKey{}, observer)
@@ -31,15 +44,15 @@ func reportContinuationRound(ctx context.Context) {
 	}
 }
 
-// ContextWithUpstreamModeObserver 记录实际 RPC、传输模式与流式回退原因
-func ContextWithUpstreamModeObserver(ctx context.Context, observer func(string, string, string)) context.Context {
+// ContextWithUpstreamModeObserver 记录实际 RPC、传输模式、续写轮次与流式回退原因
+func ContextWithUpstreamModeObserver(ctx context.Context, observer func(method, mode string, round int, reason string)) context.Context {
 	return context.WithValue(ctx, upstreamModeContextKey{}, observer)
 }
 
-// reportUpstreamMode 在发送请求前报告实际采用的上游调用方式
-func reportUpstreamMode(ctx context.Context, method, mode, reason string) {
-	if observer, ok := ctx.Value(upstreamModeContextKey{}).(func(string, string, string)); ok {
-		observer(method, mode, reason)
+// reportUpstreamMode 在发送请求前报告实际采用的上游调用方式，round 为续写轮次，原请求为 0
+func reportUpstreamMode(ctx context.Context, method, mode string, round int, reason string) {
+	if observer, ok := ctx.Value(upstreamModeContextKey{}).(func(string, string, int, string)); ok {
+		observer(method, mode, round, reason)
 	}
 }
 
