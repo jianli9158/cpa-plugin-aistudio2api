@@ -1,6 +1,6 @@
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
-SPIDERMONKEY_VERSION ?= v158.0.1-aistudio2api.1
+SPIDERMONKEY_VERSION ?= v158.0.1-aistudio2api.2
 SPIDERMONKEY_DIR := $(CURDIR)/spidermonkey
 LIBWEBP_VERSION ?= v1.6.0-aistudio2api.1
 LIBWEBP_DIR := $(CURDIR)/libwebp
@@ -38,9 +38,11 @@ OUT_FILE := $(OUT_DIR)/aistudio2api$(EXT)
 all: build
 
 spidermonkey:
-	@if [ ! -d "$(SPIDERMONKEY_DIR)/lib" ]; then \
+	@if [ ! -d "$(SPIDERMONKEY_DIR)/lib" ] || [ "$$(cat "$(SPIDERMONKEY_DIR)/.version" 2>/dev/null)" != "$(SPIDERMONKEY_VERSION)" ]; then \
+		rm -rf "$(SPIDERMONKEY_DIR)"; \
 		mkdir -p "$(SPIDERMONKEY_DIR)"; \
 		curl -fsSL "$(SM_URL)" | tar -xz -C "$(SPIDERMONKEY_DIR)"; \
+		printf '%s\n' "$(SPIDERMONKEY_VERSION)" > "$(SPIDERMONKEY_DIR)/.version"; \
 	fi
 	@if [ ! -d "$(LIBWEBP_DIR)/lib" ]; then \
 		mkdir -p "$(LIBWEBP_DIR)"; \

@@ -21,7 +21,7 @@ permissions:
   contents: write
 
 env:
-  SPIDERMONKEY_TAG: v158.0.1-aistudio2api.1
+  SPIDERMONKEY_TAG: v158.0.1-aistudio2api.2
   LIBWEBP_TAG: v1.6.0-aistudio2api.1
   LLVM_MINGW_VER: "20261020"
   ZIG_VER: "0.16.0"
