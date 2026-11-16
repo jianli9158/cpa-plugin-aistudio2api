@@ -21,8 +21,14 @@ func requestLogData(entry api.AccessLog) *api.RequestLog {
 		InputMessages: entry.InputMessages, InputTextChars: entry.InputTextChars,
 		InputMedia: entry.InputMedia, InputMediaBytes: entry.InputMediaBytes, InputFiles: entry.InputFiles,
 		FirstEventMS: float64(entry.FirstEvent) / float64(time.Millisecond), UpstreamBytes: entry.UpstreamBytes,
-		QueueMS: float64(entry.QueueWait) / float64(time.Millisecond), ProofMS: float64(entry.Proof) / float64(time.Millisecond),
+		QueueMS: float64(entry.QueueWait) / float64(time.Millisecond), ProofMS: float64(entry.Proof.Total) / float64(time.Millisecond),
 		Channel: entry.Channel,
+	}
+	if entry.Proof.Total > 0 {
+		data.ProofPhases = &api.RequestLogProofPhases{ProofPhasesMS: api.ProofPhasesMS{
+			LockMS: float64(entry.Proof.Lock) / float64(time.Millisecond), InteractionMS: float64(entry.Proof.Interaction) / float64(time.Millisecond),
+			RefreshMS: float64(entry.Proof.Refresh) / float64(time.Millisecond), ComputeMS: float64(entry.Proof.Compute) / float64(time.Millisecond),
+		}, SettingsSkipped: entry.Proof.SettingsSkipped}
 	}
 	if entry.Generation {
 		data.Parameters = map[string]string{

@@ -1429,8 +1429,27 @@ async function loadLogs() {
         stageHtml = '<span class="log-stage' + cls + '">' + escapeHtml(st.name + progress) + '</span>';
       }
       let fieldsHtml = '';
-      if (Array.isArray(l.fields) && l.fields.length) {
-        fieldsHtml = '<span class="log-fields">' + l.fields.map(f =>
+      const fields = Array.isArray(l.fields) ? l.fields.slice() : [];
+      if (l.request && l.event === 'request.finished') {
+        const r = l.request;
+        if (r.model) fields.push({ key: 'model', value: r.model });
+        if (r.status) fields.push({ key: 'status', value: r.status });
+        if (r.duration_ms > 0) fields.push({ key: 'duration', value: Math.round(r.duration_ms) + 'ms' });
+        if (r.first_event_ms > 0) fields.push({ key: 'ttfb', value: Math.round(r.first_event_ms) + 'ms' });
+        if (r.proof_ms > 0) fields.push({ key: 'waa_proof', value: Math.round(r.proof_ms) + 'ms' });
+        if (r.proof_phases) {
+          const pp = r.proof_phases;
+          const parts = [];
+          if (pp.lock_ms > 0) parts.push('等待页面:' + pp.lock_ms.toFixed(1) + 'ms');
+          if (pp.interaction_ms > 0) parts.push('页面操作:' + pp.interaction_ms.toFixed(1) + 'ms');
+          if (pp.refresh_ms > 0) parts.push('等待WAA刷新:' + pp.refresh_ms.toFixed(1) + 'ms');
+          if (pp.compute_ms > 0) parts.push('WAA计算:' + pp.compute_ms.toFixed(1) + 'ms');
+          if (pp.settings_skipped > 0) parts.push('跳过设置:' + pp.settings_skipped);
+          if (parts.length) fields.push({ key: 'proof_phases', value: parts.join(' / ') });
+        }
+      }
+      if (fields.length) {
+        fieldsHtml = '<span class="log-fields">' + fields.map(f =>
           '<span class="log-field"><span class="log-field-key">' + escapeHtml(f.key) + '</span>=<span class="log-field-val">' + escapeHtml(f.value) + '</span></span>'
         ).join('') + '</span>';
       }

@@ -27,7 +27,7 @@ func TestCamouLocaleSanitizationAndContextInit(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("camouLocale(%q) = %v, want %v", tc.input, got, tc.want)
 		}
-		mozjs.SetCamouLocale(got[0], got[1], got[2])
+		mozjs.SetCamouLocale(got[2])
 		cx, err := mozjs.NewContext(mozjs.Options{HeapBytes: 32 << 20, Locale: got[2]})
 		if err != nil {
 			t.Fatalf("NewContext(%v) error: %v", got, err)

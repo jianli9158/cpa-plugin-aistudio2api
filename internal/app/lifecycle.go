@@ -97,6 +97,8 @@ type runtimeManager struct {
 	startMu            sync.Mutex
 	mu                 sync.RWMutex
 	current            *runtimeGeneration
+	// accountsMu 由账户的新增、导入、续签、更新、删除、登录与刷新在操作期间持读锁，生成服务换代从停止旧生成服务到发布新生成服务持写锁
+	accountsMu sync.RWMutex
 	startCancel     context.CancelFunc
 	launching       chan struct{}
 	autoStartCancel context.CancelFunc
@@ -191,18 +193,24 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 
 	next := current
 	var err error
+	release := func() {}
 	if initial != current || !reflect.DeepEqual(cfg, current.config) {
+		manager.accountsMu.Lock()
+		release = manager.accountsMu.Unlock
 		if _, err := current.admin.StopService(ctx); err != nil {
+			release()
 			manager.finishStart(launchCancel)
 			return api.AdminStatus{}, err
 		}
 		next, err = manager.factory(launchCtx, manager.lifecycle, cfg, manager.requests)
 		if err != nil {
+			release()
 			manager.finishStart(launchCancel)
 			return api.AdminStatus{}, err
 		}
 	}
 	if launchCtx.Err() != nil {
+		release()
 		manager.finishStart(launchCancel)
 		if next != current {
 			_ = next.Close()
@@ -215,7 +223,7 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 	current = manager.current
 	manager.current = next
 	manager.mu.Unlock()
-
+	release()
 	if next != current {
 		current.lifecycleCancel()
 	}
@@ -508,6 +516,14 @@ func (manager *runtimeManager) CreateAccount(ctx context.Context, input api.Acco
 	return manager.current.admin.CreateAccount(ctx, input, view)
 }
 
+// accountAdmin 返回当前生成服务的管理接口与结束本次账户操作的函数，结束前生成服务不换代
+func (manager *runtimeManager) accountAdmin() (generationAdmin, func()) {
+	manager.accountsMu.RLock()
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.current.admin, manager.accountsMu.RUnlock
+}
+
 // ChromeImportProfiles 返回当前生成服务可导入的 Chrome 账号
 func (manager *runtimeManager) ChromeImportProfiles(ctx context.Context) ([]api.ChromeImportProfile, error) {
 	manager.mu.RLock()
@@ -531,51 +547,51 @@ func (manager *runtimeManager) DiscoverCookieAccounts(ctx context.Context, input
 
 // ImportChromeAccounts 在当前生成服务批量导入 Chrome 账号
 func (manager *runtimeManager) ImportChromeAccounts(ctx context.Context, input api.ChromeImportInput) ([]api.AdminAccount, error) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.ImportChromeAccounts(ctx, input)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.ImportChromeAccounts(ctx, input)
 }
 
 // ImportAccountState 在当前生成服务导入远程配对或 Cookie 导入的账户
 func (manager *runtimeManager) ImportAccountState(ctx context.Context, input api.AccountStateInput) (api.AdminAccount, error) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.ImportAccountState(ctx, input)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.ImportAccountState(ctx, input)
 }
 
 // RenewAccountCookies 在当前生成服务以配对续签凭据替换账户的会话 Cookie
 func (manager *runtimeManager) RenewAccountCookies(ctx context.Context, accountID string, token string, cookies []aistudio.StateCookie) (api.AdminAccount, error) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.RenewAccountCookies(ctx, accountID, token, cookies)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.RenewAccountCookies(ctx, accountID, token, cookies)
 }
 
 // UpdateAccount 在当前生成服务更新账户
 func (manager *runtimeManager) UpdateAccount(ctx context.Context, id string, input api.AccountInput) (api.AdminAccount, error) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.UpdateAccount(ctx, id, input)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.UpdateAccount(ctx, id, input)
 }
 
 // DeleteAccount 在当前生成服务删除账户
 func (manager *runtimeManager) DeleteAccount(ctx context.Context, id string) error {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.DeleteAccount(ctx, id)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.DeleteAccount(ctx, id)
 }
 
 // LoginAccount 在当前生成服务登录账户
 func (manager *runtimeManager) LoginAccount(ctx context.Context, id string, view *camoufoxnative.LiveView) (api.AdminAccount, error) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.LoginAccount(ctx, id, view)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.LoginAccount(ctx, id, view)
 }
 
 // RefreshAccount 在当前生成服务立即刷新账户状态
 func (manager *runtimeManager) RefreshAccount(ctx context.Context, id string) (api.AdminAccountRefresh, error) {
-	manager.mu.RLock()
-	defer manager.mu.RUnlock()
-	return manager.current.admin.RefreshAccount(ctx, id)
+	admin, done := manager.accountAdmin()
+	defer done()
+	return admin.RefreshAccount(ctx, id)
 }
 
 // ClearLogs 清空进程级管理日志

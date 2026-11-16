@@ -331,6 +331,11 @@ func (transport *authRetryProtectedTransport) DoProtectedDecision(
 	})
 }
 
+// RanBefore 判断账户页面此前运行过 contents 这同一段对话
+func (transport *authRetryProtectedTransport) RanBefore(accountID string, contents []aistudio.Content) bool {
+	return transport.transport.(aistudio.PageRunsProtectedTransport).RanBefore(accountID, contents)
+}
+
 // Refresh 续签 generation 下失效的租约账户并保存新的 storage state，此后已有续签提交时直接复用
 func (refresher *authRuntimeRefresher) Refresh(ctx context.Context, generation uint64) error {
 	lease, ok := aistudio.AccountLeaseFromContext(ctx)

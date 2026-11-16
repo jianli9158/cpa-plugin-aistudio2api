@@ -21,6 +21,25 @@ type upstreamModeContextKey struct{}
 type continuationContextKey struct{}
 
 type regenerationContextKey struct{}
+type serviceRunContextKey struct{}
+
+// ContextWithServiceRun 记下生成服务本次运行的上下文，服务停止时它被取消
+func ContextWithServiceRun(ctx context.Context, run context.Context) context.Context {
+	return context.WithValue(ctx, serviceRunContextKey{}, run)
+}
+
+// afterServiceStop 在 ctx 所属的生成服务停止时调用 stop，服务已停止时在返回前调用，返回撤销注册的函数；ctx 没有记下服务运行时不调用
+func afterServiceStop(ctx context.Context, stop func()) func() bool {
+	run, ok := ctx.Value(serviceRunContextKey{}).(context.Context)
+	if !ok {
+		return func() bool { return false }
+	}
+	if run.Err() != nil {
+		stop()
+	}
+	return context.AfterFunc(run, stop)
+}
+
 
 // ContextWithRegenerationObserver 在异常结束、流中断或流尾 5xx 触发重新生成时调用 observer
 func ContextWithRegenerationObserver(ctx context.Context, observer func(attempt, max int, reason string)) context.Context {
