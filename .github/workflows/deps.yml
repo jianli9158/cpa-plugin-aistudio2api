@@ -619,7 +619,7 @@ jobs:
             arg=$1; shift; i=$((i + 1))
             if [ "$skip" = "1" ]; then skip=0; continue; fi
             case "$arg" in
-              --target=*) continue ;;
+              --target=*|-Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419) continue ;;
               -target) skip=1; continue ;;
             esac
             set -- "$@" "$arg"
@@ -638,7 +638,7 @@ jobs:
             arg=$1; shift; i=$((i + 1))
             if [ "$skip" = "1" ]; then skip=0; continue; fi
             case "$arg" in
-              --target=*) continue ;;
+              --target=*|-Wl,--fix-cortex-a53-843419|--fix-cortex-a53-843419) continue ;;
               -target) skip=1; continue ;;
             esac
             set -- "$@" "$arg"
