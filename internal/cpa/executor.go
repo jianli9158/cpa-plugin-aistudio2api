@@ -46,37 +46,140 @@ func (p *Plugin) handleExecutorIdentifier() (any, error) {
 
 func (p *Plugin) prepareExecutionContext(
 	baseCtx context.Context,
+	targetModel string,
 	storageJSON []byte,
 	authMetadata map[string]any,
 	authAttributes map[string]string,
-) (context.Context, *app.PluginRuntime, error) {
+) (context.Context, *app.PluginRuntime, string, error) {
 	rt, err := p.Runtime()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
-	var payload AuthFilePayload
-	if len(storageJSON) > 0 {
-		_ = json.Unmarshal(storageJSON, &payload)
+	accountID := extractAccountIDFromAuth(nil, authMetadata, authAttributes)
+	needUpsert := true
+	if accountID != "" && rt.Pool() != nil {
+		if existing, ok := rt.Pool().AccountByID(accountID); ok && existing != nil && existing.State != aistudio.AccountAuthRequired {
+			needUpsert = false
+		}
 	}
-	accountID := extractAccountIDFromAuth(storageJSON, authMetadata, authAttributes)
-	if state, ok := extractStorageStateFromPayload(storageJSON, payload); ok {
-		if acc, err := p.upsertAccountInRuntime(baseCtx, rt, accountID, payload, state, false); err == nil && acc.ID != "" {
-			accountID = strings.ToLower(strings.TrimSpace(acc.ID))
+	if needUpsert && len(storageJSON) > 0 {
+		var payload AuthFilePayload
+		_ = json.Unmarshal(storageJSON, &payload)
+		if accountID == "" {
+			accountID = extractAccountIDFromAuth(storageJSON, authMetadata, authAttributes)
+		}
+		if state, ok := extractStorageStateFromPayload(storageJSON, payload); ok {
+			if acc, uErr := p.upsertAccountInRuntime(baseCtx, rt, accountID, payload, state, false); uErr == nil && acc.ID != "" {
+				accountID = strings.ToLower(strings.TrimSpace(acc.ID))
+			}
 		}
 	}
 
 	if err := rt.EnsureRunning(baseCtx); err != nil {
-		return nil, nil, pluginabi.NewError("service_unavailable", "AIStudio2API runtime failed to start: "+err.Error(), http.StatusServiceUnavailable)
+		return nil, nil, accountID, pluginabi.NewError("service_unavailable", "AIStudio2API runtime failed to start: "+err.Error(), http.StatusServiceUnavailable)
 	}
 
 	reqCtx := baseCtx
-	if accountID != "" && boolOrDefault(p.Config().PinExecutorAccount, true) {
-		if acc, ok := rt.Pool().AccountByID(accountID); ok && acc != nil && acc.Config.Enabled {
+	if accountID != "" && p.ShouldPinExecutorAccount(baseCtx, rt, accountID, targetModel) {
+		if acc, ok := rt.Pool().AccountByID(accountID); ok && acc != nil {
 			reqCtx = app.ContextWithPinnedAccountID(reqCtx, acc.ID)
 		}
 	}
-	return reqCtx, rt, nil
+	return reqCtx, rt, accountID, nil
+}
+
+// ShouldPinExecutorAccount reports whether an incoming executor request should pin
+// execution to accountID, unpinning when accountID is degraded or cooling down on
+// targetModel while other pool accounts remain enabled.
+func (p *Plugin) ShouldPinExecutorAccount(
+	ctx context.Context,
+	rt *app.PluginRuntime,
+	accountID string,
+	targetModel string,
+) bool {
+	if !boolOrDefault(p.Config().PinExecutorAccount, true) || rt == nil || rt.Pool() == nil {
+		return false
+	}
+	acc, ok := rt.Pool().AccountByID(strings.ToLower(strings.TrimSpace(accountID)))
+	if !ok || acc == nil || !acc.Config.Enabled {
+		return false
+	}
+	switch acc.State {
+	case aistudio.AccountAuthRequired, aistudio.AccountRestricted, aistudio.AccountUnavailable:
+		p.syncDegradedAccountIfChanged("", rt, acc.ID)
+		return false
+	}
+	if len(rt.Pool().EnabledAccounts()) <= 1 {
+		return true
+	}
+	cleanModel := StripModelPrefix(targetModel, p.Config().ModelPrefix)
+	cleanModel = strings.TrimPrefix(cleanModel, "models/")
+	if baseModel, _, suffixErr := aistudio.ApplyModelSuffix(cleanModel, aistudio.GenerationConfig{}); suffixErr == nil && baseModel != "" {
+		cleanModel = baseModel
+	}
+	cleanModel = rt.Pool().CanonicalModelID(cleanModel)
+	if cleanModel == "" {
+		return !rt.Pool().AccountCoolingDown(acc.ID, "")
+	}
+	sel := aistudio.AccountSelection{
+		ModelID:           cleanModel,
+		Method:            inferUpstreamMethodForModel(cleanModel),
+		AllowedAccountIDs: []string{acc.ID},
+	}
+	groups, err := rt.Pool().ClassifyCandidates(ctx, sel, nil)
+	if err != nil {
+		return !rt.Pool().AccountCoolingDown(acc.ID, cleanModel)
+	}
+	total := len(groups.WarmReady) + len(groups.StandbyReady) + len(groups.WarmAvailable) + len(groups.StandbyBusy) + len(groups.WarmBusy)
+	if total == 0 && sel.Method != "" && groups.EarliestCooldown.Until.IsZero() {
+		sel.Method = ""
+		if fallback, fErr := rt.Pool().ClassifyCandidates(ctx, sel, nil); fErr == nil {
+			total = len(fallback.WarmReady) + len(fallback.StandbyReady) + len(fallback.WarmAvailable) + len(fallback.StandbyBusy) + len(fallback.WarmBusy)
+		}
+	}
+	return total > 0
+}
+
+func resolveExecutorTargetModel(model string, payload []byte) string {
+	if trimmed := strings.TrimSpace(model); trimmed != "" {
+		return trimmed
+	}
+	if len(payload) > 0 {
+		return strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	}
+	return ""
+}
+
+func patchJSONModelAndStream(
+	payload []byte,
+	model string,
+	setModelIfMissing bool,
+	setStream bool,
+	stream bool,
+) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	body := payload
+	if model != "" {
+		cur := gjson.GetBytes(body, "model")
+		if (cur.Exists() || setModelIfMissing) && cur.String() != model {
+			if updated, err := sjson.SetBytes(body, "model", model); err == nil {
+				body = updated
+			}
+		}
+	}
+	if setStream {
+		cur := gjson.GetBytes(body, "stream")
+		alreadyMatches := (stream && cur.Type == gjson.True) || (!stream && cur.Type == gjson.False)
+		if !alreadyMatches {
+			if updated, err := sjson.SetBytes(body, "stream", stream); err == nil {
+				body = updated
+			}
+		}
+	}
+	return body
 }
 
 func (p *Plugin) buildInternalHTTPRequest(
@@ -93,13 +196,7 @@ func (p *Plugin) buildInternalHTTPRequest(
 		}
 	}
 
-	body := bytes.Clone(req.Payload)
-	if len(body) > 0 && cleanModel != "" && gjson.GetBytes(body, "model").Exists() {
-		if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-			body = updated
-		}
-	}
-
+	body := req.Payload
 	format := strings.ToLower(strings.TrimSpace(req.Format))
 	if format == "" {
 		format = strings.ToLower(strings.TrimSpace(req.SourceFormat))
@@ -120,92 +217,57 @@ func (p *Plugin) buildInternalHTTPRequest(
 		switch {
 		case gjson.GetBytes(body, "questions").Exists():
 			targetPath = "/v1beta/decisions"
-			if len(body) > 0 && cleanModel != "" {
-				if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-					body = updated
-				}
-			}
+			body = patchJSONModelAndStream(body, cleanModel, true, false, false)
 		case gjson.GetBytes(body, "instances").Exists():
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 			if strings.Contains(lowerModel, "veo") {
 				targetPath = "/v1beta/models/" + cleanModel + ":predictLongRunning"
 			} else {
 				targetPath = "/v1beta/models/" + cleanModel + ":predict"
 			}
 		case gjson.GetBytes(body, "requests").Exists() && strings.Contains(lowerModel, "embedding"):
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 			targetPath = "/v1beta/models/" + cleanModel + ":batchEmbedContents"
 		case gjson.GetBytes(body, "content").Exists() && strings.Contains(lowerModel, "embedding"):
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 			targetPath = "/v1beta/models/" + cleanModel + ":embedContent"
 		case stream:
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 			targetPath = "/v1beta/models/" + cleanModel + ":streamGenerateContent"
 			if targetQuery.Get("alt") == "" {
 				targetQuery.Set("alt", "sse")
 			}
 		default:
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 			targetPath = "/v1beta/models/" + cleanModel + ":generateContent"
 		}
 
 	case "claude", "anthropic":
 		targetPath = "/v1/messages"
-		if len(body) > 0 {
-			if cleanModel != "" {
-				if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-					body = updated
-				}
-			}
-			if updated, err := sjson.SetBytes(body, "stream", stream); err == nil {
-				body = updated
-			}
-		}
+		body = patchJSONModelAndStream(body, cleanModel, true, true, stream)
 
 	case "openai-response", "openai_response", "responses", "openai-responses", "openai_responses":
 		targetPath = "/v1/responses"
-		if len(body) > 0 {
-			if cleanModel != "" {
-				if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-					body = updated
-				}
-			}
-			if updated, err := sjson.SetBytes(body, "stream", stream); err == nil {
-				body = updated
-			}
-		}
+		body = patchJSONModelAndStream(body, cleanModel, true, true, stream)
 
 	default:
 		lowerModel := strings.ToLower(cleanModel)
 		switch {
 		case gjson.GetBytes(body, "questions").Exists():
 			targetPath = "/v1beta/decisions"
-			if len(body) > 0 && cleanModel != "" {
-				if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-					body = updated
-				}
-			}
+			body = patchJSONModelAndStream(body, cleanModel, true, false, false)
 		case gjson.GetBytes(body, "messages").Exists():
 			targetPath = "/v1/chat/completions"
-			if cleanModel != "" {
-				if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-					body = updated
-				}
-			}
-			if updated, err := sjson.SetBytes(body, "stream", stream); err == nil {
-				body = updated
-			}
+			body = patchJSONModelAndStream(body, cleanModel, true, true, stream)
 		case gjson.GetBytes(body, "input").Exists() && strings.Contains(lowerModel, "embedding"):
 			targetPath = "/v1/embeddings"
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 		case gjson.GetBytes(body, "prompt").Exists() && (strings.Contains(lowerModel, "imagen") || strings.Contains(lowerModel, "image")):
 			targetPath = "/v1/images/generations"
+			body = patchJSONModelAndStream(body, cleanModel, false, false, false)
 		default:
 			targetPath = "/v1/chat/completions"
-			if len(body) > 0 {
-				if cleanModel != "" {
-					if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-						body = updated
-					}
-				}
-				if updated, err := sjson.SetBytes(body, "stream", stream); err == nil {
-					body = updated
-				}
-			}
+			body = patchJSONModelAndStream(body, cleanModel, true, true, stream)
 		}
 	}
 
@@ -236,10 +298,12 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 		return nil, fmt.Errorf("decode executor.execute request: %w", err)
 	}
 
-	reqCtx, rt, err := p.prepareExecutionContext(p.ctx, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
+	targetModel := resolveExecutorTargetModel(req.Model, req.Payload)
+	reqCtx, rt, accountID, err := p.prepareExecutionContext(p.ctx, targetModel, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
 	if err != nil {
 		return nil, err
 	}
+	defer p.syncDegradedAccountIfChanged(req.HostCallbackID, rt, accountID)
 
 	httpReq, err := p.buildInternalHTTPRequest(reqCtx, req.ExecutorRequest, false)
 	if err != nil {
@@ -256,7 +320,7 @@ func (p *Plugin) handleExecutorExecute(raw []byte) (any, error) {
 	}
 
 	return pluginapi.ExecutorResponse{
-		Payload: bytes.Clone(respBody),
+		Payload: respBody,
 		Headers: cloneHTTPHeader(resp.Header),
 	}, nil
 }
@@ -267,7 +331,8 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 		return nil, fmt.Errorf("decode executor.execute_stream request: %w", err)
 	}
 
-	reqCtx, rt, err := p.prepareExecutionContext(p.ctx, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
+	targetModel := resolveExecutorTargetModel(req.Model, req.Payload)
+	reqCtx, rt, accountID, err := p.prepareExecutionContext(p.ctx, targetModel, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
 	if err != nil {
 		return nil, err
 	}
@@ -282,6 +347,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 	// If no StreamID was supplied (e.g. direct unit test call), collect chunks synchronously.
 	if strings.TrimSpace(req.StreamID) == "" || p.hostCall == nil {
 		defer cancelStream()
+		defer p.syncDegradedAccountIfChanged(req.HostCallbackID, rt, accountID)
 		rec := httptest.NewRecorder()
 		rt.PublicHandler().ServeHTTP(rec, httpReq)
 		resp := rec.Result()
@@ -309,6 +375,7 @@ func (p *Plugin) handleExecutorExecuteStream(raw []byte) (any, error) {
 				}
 			}
 			cancelStream()
+			p.syncDegradedAccountIfChanged(req.HostCallbackID, rt, accountID)
 			sw.finishHandler(panicErr)
 		}()
 		rt.PublicHandler().ServeHTTP(sw, httpReq)
@@ -435,10 +502,12 @@ func (p *Plugin) handleExecutorCountTokens(raw []byte) (any, error) {
 		return nil, fmt.Errorf("decode executor.count_tokens request: %w", err)
 	}
 
-	reqCtx, rt, err := p.prepareExecutionContext(p.ctx, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
+	targetModel := resolveExecutorTargetModel(req.Model, req.Payload)
+	reqCtx, rt, accountID, err := p.prepareExecutionContext(p.ctx, targetModel, req.StorageJSON, req.AuthMetadata, req.AuthAttributes)
 	if err != nil {
 		return nil, err
 	}
+	defer p.syncDegradedAccountIfChanged(req.HostCallbackID, rt, accountID)
 
 	cleanModel := StripModelPrefix(req.Model, p.Config().ModelPrefix)
 	cleanModel = strings.TrimPrefix(cleanModel, "models/")
@@ -451,12 +520,7 @@ func (p *Plugin) handleExecutorCountTokens(raw []byte) (any, error) {
 		format = strings.ToLower(strings.TrimSpace(req.SourceFormat))
 	}
 
-	body := bytes.Clone(req.Payload)
-	if len(body) > 0 && gjson.GetBytes(body, "model").Exists() {
-		if updated, err := sjson.SetBytes(body, "model", cleanModel); err == nil {
-			body = updated
-		}
-	}
+	body := patchJSONModelAndStream(req.Payload, cleanModel, false, false, false)
 
 	var targetPath string
 	switch format {
@@ -510,7 +574,7 @@ func (p *Plugin) handleExecutorCountTokens(raw []byte) (any, error) {
 		return nil, extractHTTPError(resp.StatusCode, resp.Header, respBody)
 	}
 	return pluginapi.ExecutorResponse{
-		Payload: bytes.Clone(respBody),
+		Payload: respBody,
 		Headers: cloneHTTPHeader(resp.Header),
 	}, nil
 }
@@ -542,10 +606,11 @@ func (p *Plugin) handleExecutorHTTPRequest(raw []byte) (any, error) {
 		}
 	}
 
-	reqCtx, rt, err := p.prepareExecutionContext(p.ctx, req.StorageJSON, req.Metadata, req.Attributes)
+	reqCtx, rt, accountID, err := p.prepareExecutionContext(p.ctx, "", req.StorageJSON, req.Metadata, req.Attributes)
 	if err != nil {
 		return nil, err
 	}
+	defer p.syncDegradedAccountIfChanged(req.HostCallbackID, rt, accountID)
 	httpReq, err := http.NewRequestWithContext(reqCtx, method, targetURL, bytes.NewReader(req.Body))
 	if err != nil {
 		return nil, err
@@ -564,7 +629,7 @@ func (p *Plugin) handleExecutorHTTPRequest(raw []byte) (any, error) {
 	return pluginapi.ExecutorHTTPResponse{
 		StatusCode: resp.StatusCode,
 		Headers:    cloneHTTPHeader(resp.Header),
-		Body:       bytes.Clone(rec.Body.Bytes()),
+		Body:       rec.Body.Bytes(),
 	}, nil
 }
 

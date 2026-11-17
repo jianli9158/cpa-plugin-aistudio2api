@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
-
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 )
@@ -21,6 +21,7 @@ type requestRegistry struct {
 	logs        []api.AdminLog
 	subscribers map[*eventSubscriber]struct{}
 	console     chan api.AdminLog
+	logHook     atomic.Pointer[func(api.AdminLog)]
 	// firstEvents 是各模型与通道近期原请求的首事件等待，生成服务重启后保留
 	firstEvents *firstEventStats
 }
@@ -204,6 +205,10 @@ func (registry *requestRegistry) writeConsole(ctx context.Context) {
 	for {
 		select {
 		case entry := <-registry.console:
+			if hookPtr := registry.logHook.Load(); hookPtr != nil && *hookPtr != nil {
+				(*hookPtr)(entry)
+				continue
+			}
 			level := slog.LevelInfo
 			switch entry.Level {
 			case "ERROR":

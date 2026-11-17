@@ -293,10 +293,31 @@ func (rt *PluginRuntime) CachedModels() []aistudio.Model {
 
 // RecentLogs returns recent runtime logs.
 func (rt *PluginRuntime) RecentLogs() []api.AdminLog {
+	return rt.RecentLogsLimited(0)
+}
+
+// RecentLogsLimited returns at most the latest limit runtime logs (all when limit <= 0).
+func (rt *PluginRuntime) RecentLogsLimited(limit int) []api.AdminLog {
 	if rt == nil || rt.Manager == nil || rt.Manager.requests == nil {
 		return nil
 	}
 	rt.Manager.requests.mu.Lock()
 	defer rt.Manager.requests.mu.Unlock()
-	return append([]api.AdminLog(nil), rt.Manager.requests.logs...)
+	logs := rt.Manager.requests.logs
+	if limit > 0 && len(logs) > limit {
+		logs = logs[len(logs)-limit:]
+	}
+	return append([]api.AdminLog(nil), logs...)
+}
+
+// SetLogHook installs or clears a callback receiving runtime log entries in place of raw stderr slog output.
+func (rt *PluginRuntime) SetLogHook(fn func(api.AdminLog)) {
+	if rt == nil || rt.Manager == nil || rt.Manager.requests == nil {
+		return
+	}
+	if fn == nil {
+		rt.Manager.requests.logHook.Store(nil)
+		return
+	}
+	rt.Manager.requests.logHook.Store(&fn)
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginabi"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginapi"
+	"github.com/Mag1cFall/AIStudio2API/internal/waa/mozjs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ type Plugin struct {
 	cancel          context.CancelFunc
 	pluginCfg       PluginConfig
 	appCfg          config.Config
+	modelMappings   []config.ModelAlias
 	runtime         *app.PluginRuntime
 	hostCall        HostCallFunc
 	loginStateMu    sync.Mutex
@@ -35,6 +37,8 @@ type Plugin struct {
 	hostAliases     map[string][]pluginapi.ModelAlias
 	hostAuthDir     string
 	chromeLogin     sync.Mutex
+	unhealthySyncMu sync.Mutex
+	unhealthySynced map[string]string
 	serviceStopped  atomic.Bool
 	shuttingDown    atomic.Bool
 	lastRegisterNs  atomic.Int64
@@ -57,6 +61,7 @@ func NewPlugin(hostCall HostCallFunc) *Plugin {
 		hostCall:        hostCall,
 		loginStates:     make(map[string]*loginSessionState),
 		accountExcluded: make(map[string][]string),
+		unhealthySynced: make(map[string]string),
 	}
 }
 
@@ -124,10 +129,12 @@ func (p *Plugin) Runtime() (*app.PluginRuntime, error) {
 	}
 	p.pluginCfg = pcfg
 	p.appCfg = cfg
+	p.modelMappings, _ = config.ParseModelMapping(cfg.ModelMapping)
 	rt, err = app.NewPluginRuntime(p.ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	rt.SetLogHook(p.forwardRuntimeLogToHost)
 	p.runtime = rt
 	return rt, nil
 }
@@ -136,6 +143,12 @@ func (p *Plugin) Config() PluginConfig {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.pluginCfg
+}
+
+func (p *Plugin) cachedModelMappings() []config.ModelAlias {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.modelMappings
 }
 
 type rpcLifecycleRequest struct {
@@ -363,7 +376,7 @@ func (p *Plugin) registrationPayload() rpcRegistration {
 				"anthropic",
 				"gemini",
 			},
-			RequestLifecyclePlugin: true,
+			RequestLifecyclePlugin: false,
 			CommandLinePlugin:      true,
 			ManagementAPI:          true,
 			QuotaProvider:          true,
@@ -391,6 +404,7 @@ func (p *Plugin) applyConfig(configYAML []byte, isReload bool) error {
 	p.mu.Lock()
 	p.pluginCfg = pcfg
 	p.appCfg = cfg
+	p.modelMappings, _ = config.ParseModelMapping(cfg.ModelMapping)
 	p.lastRegisterNs.Store(time.Now().UnixNano())
 	p.serviceStopped.Store(false)
 	rt := p.runtime
@@ -401,6 +415,7 @@ func (p *Plugin) applyConfig(configYAML []byte, isReload bool) error {
 			p.mu.Unlock()
 			return rtErr
 		}
+		rt.SetLogHook(p.forwardRuntimeLogToHost)
 		p.runtime = rt
 	} else {
 		rt.ApplyLiveConfig(cfg)
@@ -434,6 +449,7 @@ func (p *Plugin) handleShutdown() (any, error) {
 	rt := p.runtime
 	syncAuth := boolOrDefault(p.pluginCfg.SyncAuthFiles, true)
 	p.runtime = nil
+	p.modelMappings = nil
 	cancel := p.cancel
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.mu.Unlock()
@@ -446,12 +462,16 @@ func (p *Plugin) handleShutdown() (any, error) {
 	clear(p.hostAliases)
 	p.hostAuthDir = ""
 	p.excludedMu.Unlock()
+	p.unhealthySyncMu.Lock()
+	clear(p.unhealthySynced)
+	p.unhealthySyncMu.Unlock()
 	if syncAuth && rt != nil {
 		p.setHostAuthFilesDisabled(rt, true)
 	}
 	if rt != nil {
 		_ = rt.Close()
 	}
+	mozjs.ClearStencilCache()
 	if cancel != nil {
 		cancel()
 	}
@@ -494,4 +514,44 @@ func (p *Plugin) logHost(callbackID, level, message string, fields map[string]st
 		"fields":           fields,
 	}
 	_, _ = p.callHost(pluginabi.MethodHostLog, req)
+}
+
+func (p *Plugin) forwardRuntimeLogToHost(entry api.AdminLog) {
+	if p.shuttingDown.Load() {
+		return
+	}
+	lvl := strings.ToUpper(strings.TrimSpace(entry.Level))
+	if lvl != "WARN" && lvl != "ERROR" {
+		return
+	}
+	p.mu.RLock()
+	hasHost := p.hostCall != nil
+	p.mu.RUnlock()
+	if !hasHost {
+		return
+	}
+	fields := make(map[string]string, len(entry.Fields)+5)
+	if entry.Source != "" {
+		fields["source"] = entry.Source
+	}
+	if entry.Event != "" {
+		fields["event"] = entry.Event
+	}
+	if entry.Request != nil {
+		if entry.Request.Model != "" {
+			fields["model"] = entry.Request.Model
+		}
+		if entry.Request.Status > 0 {
+			fields["status"] = fmt.Sprintf("%d", entry.Request.Status)
+		}
+		if entry.Request.Error != "" {
+			fields["error"] = entry.Request.Error
+		}
+	}
+	for _, f := range entry.Fields {
+		if f.Key != "" {
+			fields[f.Key] = f.Value
+		}
+	}
+	p.logHost("", strings.ToLower(lvl), entry.Message, fields)
 }

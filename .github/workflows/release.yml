@@ -9,7 +9,7 @@ on:
       tag:
         description: "Release tag (e.g. v1.0.1)"
         required: true
-        default: "v1.2.2"
+        default: "v1.2.9"
 
 permissions:
   contents: write
@@ -45,7 +45,7 @@ jobs:
             sm_platform: linux-amd64-glibc228
           - goos: linux
             goarch: arm64
-            os: ubuntu-24.04
+            os: ubuntu-24.04-arm
             ext: .so
             sm_platform: linux-arm64
           - goos: windows
@@ -89,7 +89,17 @@ jobs:
             echo "CXX=x86_64-w64-mingw32-clang++" >> "$GITHUB_ENV"
           fi
 
+      - name: Cache Static Libraries (${{ matrix.sm_platform }})
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            spidermonkey
+            libwebp
+          key: static-deps-${{ matrix.sm_platform }}-${{ env.SPIDERMONKEY_TAG }}-${{ env.LIBWEBP_TAG }}
+
       - name: Download Static Libraries (${{ matrix.sm_platform }})
+        if: steps.cache-deps.outputs.cache-hit != 'true'
         shell: bash
         run: |
           mkdir -p spidermonkey libwebp
@@ -110,7 +120,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Run Go Vet & Unit Tests (Native Targets)
-        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || (matrix.goos == 'linux' && matrix.goarch == 'amd64')
+        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || matrix.goos == 'linux'
         shell: bash
         run: |
           export CGO_ENABLED=1
@@ -119,9 +129,12 @@ jobs:
           if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "amd64" ]; then
             export CC="zig cc -target x86_64-linux-gnu.2.28"
             export CXX="zig c++ -target x86_64-linux-gnu.2.28"
+          elif [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export CC="zig cc -target aarch64-linux-gnu.2.28"
+            export CXX="zig c++ -target aarch64-linux-gnu.2.28"
           fi
           go vet ./...
-          go test ./internal/aistudio ./internal/api ./internal/config ./internal/cpa ./internal/imagecodec/... ./internal/proxydial ./internal/resample ./internal/waa
+          go test ./internal/aistudio ./internal/api ./internal/app ./internal/config ./internal/cpa ./internal/imagecodec/... ./internal/proxydial ./internal/resample ./internal/waa
       - name: Build Dynamic Library & Package Zip
         shell: bash
         run: |
@@ -133,13 +146,14 @@ jobs:
           export GOARCH=${{ matrix.goarch }}
           export CGO_CPPFLAGS="-I${PWD}/spidermonkey/include -I${PWD}/libwebp/include"
           export CGO_LDFLAGS="-L${PWD}/spidermonkey/lib -L${PWD}/libwebp/lib"
+          LDFLAGS="-s -w"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             export MACOSX_DEPLOYMENT_TARGET="13.0"
             export CGO_CFLAGS="-O2 -mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
             export CGO_CXXFLAGS="-O2 -mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
             export CGO_LDFLAGS="${CGO_LDFLAGS} -mmacosx-version-min=13.0 -arch ${{ matrix.goarch == 'amd64' && 'x86_64' || 'arm64' }}"
-          fi
-          if [ "${{ matrix.goos }}" = "linux" ]; then
+            LDFLAGS="-s -w -extldflags '-Wl,-exported_symbols_list,${PWD}/cmd/aistudio2api-plugin/exports_darwin.txt -Wl,-dead_strip'"
+          elif [ "${{ matrix.goos }}" = "linux" ]; then
             if [ "${{ matrix.goarch }}" = "amd64" ]; then
               export CC="zig cc -target x86_64-linux-gnu.2.28"
               export CXX="zig c++ -target x86_64-linux-gnu.2.28"
@@ -147,16 +161,28 @@ jobs:
               export CC="zig cc -target aarch64-linux-gnu.2.28"
               export CXX="zig c++ -target aarch64-linux-gnu.2.28"
             fi
+            LDFLAGS="-s -w -extldflags '-Wl,--version-script=${PWD}/cmd/aistudio2api-plugin/exports_linux.map -Wl,--exclude-libs,ALL -Wl,--gc-sections'"
           fi
-          go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o "out/${LIB_NAME}" ./cmd/aistudio2api-plugin
+          go build -trimpath -ldflags="${LDFLAGS}" -buildmode=c-shared -o "out/${LIB_NAME}" ./cmd/aistudio2api-plugin
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            nm -gU "out/${LIB_NAME}"
+            test "$(nm -gU "out/${LIB_NAME}" | wc -l | tr -d ' ')" = "5"
+          fi
           if [ "${{ matrix.goos }}" = "linux" ]; then
             readelf -d "out/${LIB_NAME}" | grep NEEDED
+            EXPORTED_SYMS=$(readelf --dyn-syms -W "out/${LIB_NAME}" | awk '($4 == "FUNC" || $4 == "OBJECT") && ($5 == "GLOBAL" || $5 == "WEAK") && $7 != "UND" { sub(/@@?.*/, "", $8); print $8 }' | grep -vE '^(_init|_fini|_edata|_end|__bss_start)$' | sort -u)
+            echo "EXPORTED_SYMS=${EXPORTED_SYMS}"
+            EXPECTED_SYMS=$(printf '%s\n' cliproxyPluginCall cliproxyPluginFree cliproxyPluginInit cliproxyPluginShutdown cliproxy_plugin_init | sort)
+            test "$EXPORTED_SYMS" = "$EXPECTED_SYMS"
             BAD_GLIBC=$(readelf -V "out/${LIB_NAME}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -u | awk -F_ '{
               split($2, a, ".");
               if ((a[1]+0) > 2 || ((a[1]+0) == 2 && (a[2]+0) > 28)) print $0
             }')
             echo "BAD_GLIBC=${BAD_GLIBC:-none}"
             test -z "$BAD_GLIBC"
+          fi
+          if [ "${{ matrix.goos }}" = "linux" ] || ( [ "${{ matrix.goos }}" = "darwin" ] && [ "${{ matrix.goarch }}" = "arm64" ] ); then
+            CPA_PLUGIN_LIB_PATH="${PWD}/out/${LIB_NAME}" go test -v ./internal/cpa -run TestDynamicLibraryDLOpenABI
           fi
           (cd out && zip -qr "../${ZIP_NAME}" "${LIB_NAME}")
       - name: Upload Artifact

@@ -401,6 +401,16 @@ func (cx *Context) GC() { C.mz_gc(cx.c, false) }
 // ShrinkGC 执行一次收缩的完整 GC，归还空闲内存并丢弃 JIT 代码
 func (cx *Context) ShrinkGC() { C.mz_gc(cx.c, true) }
 
+// ClearStencilCache 清空进程内 SpiderMonkey XDR 编译缓存
+func ClearStencilCache() { C.mz_clear_stencil_cache() }
+
+// StencilCacheStats 返回当前进程内 SpiderMonkey XDR 编译缓存的条目数与字节数
+func StencilCacheStats() (entries int, bytes int) {
+	var cEntries, cBytes C.size_t
+	C.mz_stencil_cache_stats(&cEntries, &cBytes)
+	return int(cEntries), int(cBytes)
+}
+
 // Call 是一次原生函数调用
 type Call struct {
 	c       *C.mz_call

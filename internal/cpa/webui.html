@@ -737,16 +737,16 @@ function getKey() {
     updateKeyBadge();
     return input.value.trim();
   }
-  const candidates = ['cpa_aistudio2api_key', 'management_key', 'cpa-management-key', 'secret-key', 'secretKey', 'managementKey', 'apiKey', 'token'];
-  const stores = [localStorage, sessionStorage];
+  const candidates = ['cpa_aistudio2api_key', 'cpa_management_key', 'cpa-management-key', 'management_key', 'managementKey'];
+  const stores = [sessionStorage];
   try {
-    if (window.parent && window.parent !== window && window.parent.localStorage) {
-      stores.push(window.parent.localStorage);
+    if (window.parent && window.parent !== window && window.parent.sessionStorage) {
+      stores.push(window.parent.sessionStorage);
     }
   } catch (_) {}
   try {
-    if (window.opener && window.opener.localStorage) {
-      stores.push(window.opener.localStorage);
+    if (window.opener && window.opener.sessionStorage) {
+      stores.push(window.opener.sessionStorage);
     }
   } catch (_) {}
   for (const store of stores) {
@@ -767,14 +767,15 @@ function getKey() {
 
 function saveKeyAndReload() {
   const k = document.getElementById('mgmtKey').value.trim();
+  try { localStorage.removeItem('cpa_aistudio2api_key'); } catch (_) {}
   if (k) {
-    localStorage.setItem('cpa_aistudio2api_key', k);
+    sessionStorage.setItem('cpa_aistudio2api_key', k);
     if (lastRejectedKey === k) lastRejectedKey = null;
-    showToast('管理密钥已保存，正在加载运行状态...', false);
+    showToast('管理密钥已保存在当前会话，正在加载运行状态...', false);
   } else {
-    localStorage.removeItem('cpa_aistudio2api_key');
+    sessionStorage.removeItem('cpa_aistudio2api_key');
     lastRejectedKey = null;
-    showToast('已清除保存的管理密钥', false);
+    showToast('已清除当前会话保存的管理密钥', false);
   }
   updateKeyBadge();
   loadStatus();
@@ -1412,7 +1413,7 @@ async function loadLogs() {
     return;
   }
   try {
-    const res = await apiCall('/v0/management/aistudio2api/logs');
+    const res = await apiCall('/v0/management/aistudio2api/logs?limit=80');
     const logs = res.logs || [];
     const box = document.getElementById('logsBox');
     if (!logs.length) {
@@ -1507,17 +1508,25 @@ getKey();
 loadStatus();
 loadLogs();
 setInterval(() => {
+  if (document.hidden) return;
   document.querySelectorAll('[data-until]').forEach(el => {
     const u = el.getAttribute('data-until');
     if (u) el.textContent = formatCooldownRemaining(u);
   });
 }, 1000);
 setInterval(() => {
+  if (document.hidden) return;
   if (!editingProxyAccountId) {
     loadStatus();
   }
   loadLogs();
 }, 6000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (!editingProxyAccountId) loadStatus();
+    loadLogs();
+  }
+});
 </script>
 </body>
 </html>

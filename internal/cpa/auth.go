@@ -137,6 +137,8 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 
 	prevDisabled := payload.Disabled
 	prevServiceStopped := payload.ServiceStopped
+	prevDegraded := strings.EqualFold(strings.TrimSpace(payload.State), string(aistudio.AccountRestricted)) ||
+		strings.EqualFold(strings.TrimSpace(payload.State), string(aistudio.AccountAuthRequired))
 	state, hasState := extractStorageStateFromPayload(rawJSON, payload)
 	rt, rtErr := p.Runtime()
 	var imported api.AdminAccount
@@ -165,9 +167,11 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 	disabled := false
 	if serviceStopped {
 		disabled = true
-	} else if prevServiceStopped || inStartupWindow {
+	} else if prevServiceStopped || prevDegraded || inStartupWindow {
 		if rtErr == nil && imported.ID != "" {
-			disabled = !imported.Enabled
+			disabled = !imported.Enabled ||
+				imported.State == string(aistudio.AccountRestricted) ||
+				imported.State == string(aistudio.AccountAuthRequired)
 		}
 	} else if prevDisabled != nil {
 		disabled = *prevDisabled
@@ -593,7 +597,10 @@ func (p *Plugin) buildAuthDataForAccountWithExisting(
 	accountID := strings.ToLower(strings.TrimSpace(acc.ID))
 	fileName := fmt.Sprintf("aistudio2api-%s.json", sanitizeFileComponent(accountID))
 	serviceStopped := p.serviceStopped.Load()
-	disabled := !acc.Enabled || acc.State == string(aistudio.AccountRestricted) || serviceStopped
+	disabled := !acc.Enabled ||
+		acc.State == string(aistudio.AccountRestricted) ||
+		acc.State == string(aistudio.AccountAuthRequired) ||
+		serviceStopped
 
 	payload := AuthFilePayload{
 		Type:           ProviderID,
@@ -924,6 +931,43 @@ func (p *Plugin) RemoveAccountFromHostAuth(accountID string) {
 	}
 	fileName := fmt.Sprintf("aistudio2api-%s.json", sanitizeFileComponent(strings.ToLower(strings.TrimSpace(accountID))))
 	_ = os.Remove(filepath.Join(authDir, fileName))
+}
+
+func (p *Plugin) syncDegradedAccountIfChanged(callbackID string, rt *app.PluginRuntime, accountID string) {
+	accountID = strings.ToLower(strings.TrimSpace(accountID))
+	if accountID == "" || rt == nil || rt.Pool() == nil || !boolOrDefault(p.Config().SyncAuthFiles, true) {
+		return
+	}
+	poolAcc, ok := rt.Pool().AccountByID(accountID)
+	if !ok || poolAcc == nil {
+		return
+	}
+	curState := string(poolAcc.State)
+	isDegraded := poolAcc.State == aistudio.AccountAuthRequired || poolAcc.State == aistudio.AccountRestricted
+
+	p.unhealthySyncMu.Lock()
+	if !isDegraded {
+		delete(p.unhealthySynced, accountID)
+		p.unhealthySyncMu.Unlock()
+		return
+	}
+	if p.unhealthySynced[accountID] == curState {
+		p.unhealthySyncMu.Unlock()
+		return
+	}
+	p.unhealthySynced[accountID] = curState
+	p.unhealthySyncMu.Unlock()
+
+	accounts, err := rt.Admin.Accounts(p.ctx)
+	if err != nil {
+		return
+	}
+	for _, acc := range accounts {
+		if strings.EqualFold(acc.ID, accountID) {
+			_ = p.SyncAccountToHostAuth(callbackID, acc)
+			return
+		}
+	}
 }
 
 func extractAccountIDFromAuth(storageJSON []byte, metadata map[string]any, attributes map[string]string) string {

@@ -1,0 +1,10 @@
+{
+  global:
+    cliproxy_plugin_init;
+    cliproxyPluginInit;
+    cliproxyPluginCall;
+    cliproxyPluginFree;
+    cliproxyPluginShutdown;
+  local:
+    *;
+};

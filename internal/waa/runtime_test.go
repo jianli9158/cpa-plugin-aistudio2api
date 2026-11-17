@@ -72,3 +72,63 @@ func TestFirefox158ShapeAndRealmInit(t *testing.T) {
 		t.Fatalf("unexpected token: %q", token)
 	}
 }
+
+func TestStencilCacheBoundedLRUAndClear(t *testing.T) {
+	runtimeLock := make(chan struct{})
+	go func() {
+		defer close(runtimeLock)
+		// mozjs.Context is bound to its creating OS thread via NewRuntime/eventLoop or explicit LockOSThread
+		mozjs.ClearStencilCache()
+		entries0, bytes0 := mozjs.StencilCacheStats()
+		if entries0 != 0 || bytes0 != 0 {
+			t.Errorf("expected empty stencil cache after ClearStencilCache, got entries=%d bytes=%d", entries0, bytes0)
+			return
+		}
+	}()
+	<-runtimeLock
+
+	rt, err := NewRuntime(context.Background(), Options{
+		Challenge: Challenge{
+			Program:         "prog",
+			GlobalName:      "WAA_LRU",
+			InterpreterURL:  "https://www.google.com/js/bg/lru.js",
+			InterpreterHash: "lru",
+		},
+		Interpreter: `window.WAA_LRU = { a: function(prog, cb) { cb(function(done) { done("lru_ok"); }); } };`,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime() error: %v", err)
+	}
+	entriesAfterInit, bytesAfterInit := mozjs.StencilCacheStats()
+	if entriesAfterInit == 0 || bytesAfterInit == 0 {
+		rt.Close()
+		t.Fatalf("expected non-empty stencil cache after runtime init, got entries=%d bytes=%d", entriesAfterInit, bytesAfterInit)
+	}
+	rt.Close()
+
+	// Evaluate >48 distinct scripts via isolated runtimes to verify hard LRU cap (48 entries)
+	for i := range 55 {
+		r, rErr := NewRuntime(context.Background(), Options{
+			Challenge: Challenge{
+				Program:         "p",
+				GlobalName:      "WAA_CAP",
+				InterpreterURL:  "https://www.google.com/js/bg/cap.js",
+				InterpreterHash: "cap",
+			},
+			Interpreter: `window.WAA_CAP = { idx: ` + string(rune('0'+i%10)) + `, tag: "` + strings.Repeat("x", i+1) + `", a: function(prog, cb) { cb(function(done) { done("ok"); }); } };`,
+		})
+		if rErr != nil {
+			t.Fatalf("NewRuntime(%d) error: %v", i, rErr)
+		}
+		r.Close()
+	}
+	cappedEntries, cappedBytes := mozjs.StencilCacheStats()
+	if cappedEntries > 48 {
+		t.Fatalf("expected stencil cache entries <= 48, got %d (bytes=%d)", cappedEntries, cappedBytes)
+	}
+	mozjs.ClearStencilCache()
+	clearedEntries, clearedBytes := mozjs.StencilCacheStats()
+	if clearedEntries != 0 || clearedBytes != 0 {
+		t.Fatalf("expected 0 entries/bytes after ClearStencilCache, got entries=%d bytes=%d", clearedEntries, clearedBytes)
+	}
+}

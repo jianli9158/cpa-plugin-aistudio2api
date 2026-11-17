@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,7 +129,9 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 
 	rawPath := strings.TrimSpace(req.Path)
 	path := rawPath
+	var rawQuery url.Values
 	if idx := strings.IndexByte(rawPath, '?'); idx >= 0 {
+		rawQuery, _ = url.ParseQuery(rawPath[idx+1:])
 		path = rawPath[:idx]
 	}
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
@@ -458,9 +461,17 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		return jsonManagementResponse(http.StatusOK, map[string]any{"models": models}), nil
 
 	case method == http.MethodGet && path == "/v0/management/aistudio2api/logs":
-		logs := rt.RecentLogs()
+		limit := 0
+		if vals := req.Query["limit"]; len(vals) > 0 {
+			limit, _ = strconv.Atoi(strings.TrimSpace(vals[0]))
+		} else if rawQuery != nil {
+			limit, _ = strconv.Atoi(strings.TrimSpace(rawQuery.Get("limit")))
+		}
+		if limit > 2000 {
+			limit = 2000
+		}
+		logs := rt.RecentLogsLimited(limit)
 		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": logs}), nil
-
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]any{
 			"error": fmt.Sprintf("route %s %s not found", method, path),

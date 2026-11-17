@@ -5,11 +5,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/cpa"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginabi"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginapi"
@@ -19,9 +22,12 @@ import (
 func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	var hostCallsMu sync.Mutex
 	var hostCalls []string
 	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		hostCallsMu.Lock()
 		hostCalls = append(hostCalls, method)
+		hostCallsMu.Unlock()
 		return json.Marshal(pluginabi.Envelope{
 			OK:     true,
 			Result: json.RawMessage(`{}`),
@@ -51,6 +57,9 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(string(regJSON), `"executor":true`) || !strings.Contains(string(regJSON), `"auth_provider":true`) {
 		t.Fatalf("missing expected capabilities: %s", string(regJSON))
+	}
+	if !strings.Contains(string(regJSON), `"request_lifecycle_plugin":false`) {
+		t.Fatalf("expected request_lifecycle_plugin=false to avoid per-request no-op CGO RPC: %s", string(regJSON))
 	}
 
 	// 2. auth.identifier & auth.parse
@@ -364,13 +373,23 @@ func TestSpiderMonkeyBotGuardVMIntegration(t *testing.T) {
 }
 
 func TestBuiltDynamicLibraryExists(t *testing.T) {
-	dylibPath := filepath.Join("..", "..", "dist", "plugins", "darwin", "arm64", "aistudio2api.dylib")
+	dylibPath := strings.TrimSpace(os.Getenv("CPA_PLUGIN_LIB_PATH"))
+	if dylibPath == "" {
+		ext := ".so"
+		switch runtime.GOOS {
+		case "darwin":
+			ext = ".dylib"
+		case "windows":
+			ext = ".dll"
+		}
+		dylibPath = filepath.Join("..", "..", "dist", "plugins", runtime.GOOS, runtime.GOARCH, "aistudio2api"+ext)
+	}
 	info, err := os.Stat(dylibPath)
 	if err != nil {
-		t.Skipf("dylib not found at %s: %v", dylibPath, err)
+		t.Skipf("shared library not found at %s: %v", dylibPath, err)
 	}
 	if info.Size() < 10*1024*1024 {
-		t.Fatalf("expected static-linked SpiderMonkey dylib > 10MB, got %d bytes", info.Size())
+		t.Fatalf("expected static-linked SpiderMonkey shared library > 10MB, got %d bytes", info.Size())
 	}
 }
 
@@ -857,6 +876,15 @@ func TestSchedulerPickDefersToHostSessionAffinityWhenPartialPoolCooldown(t *test
 	if sResp.Handled {
 		t.Fatalf("expected Handled=false when hostDispatched and >=1 candidate is eligible so host SessionAffinitySelector runs, got: %+v", sResp)
 	}
+
+	// When host RoundRobin/SessionAffinity dispatches to healthy@example.com, executor keeps it pinned;
+	// when dispatched to cooled@example.com on the cooled model, executor unpins so PooledService fails over.
+	if !p.ShouldPinExecutorAccount(t.Context(), rt, "healthy@example.com", "AIStudio/gemini-4-argon") {
+		t.Fatal("expected healthy@example.com to remain pinned for session affinity")
+	}
+	if p.ShouldPinExecutorAccount(t.Context(), rt, "cooled@example.com", "AIStudio/gemini-4-argon") {
+		t.Fatal("expected cooled@example.com to be unpinned on cooled model so pool can fail over")
+	}
 }
 
 func TestAssistantModelsOptInGateAndLiveReload(t *testing.T) {
@@ -1014,5 +1042,113 @@ func TestMaxRegenerationsConfigAndLiveReload(t *testing.T) {
 	}
 	if got := rt.MaxRegenerations(); got != 6 {
 		t.Fatalf("expected live MaxRegenerations=6 after reconfigure, got %d", got)
+	}
+}
+
+func TestWebUISessionStorageLogsLimitAndHostLogBridge(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	var logEventsMu sync.Mutex
+	var hostLogPayloads []string
+	logSignal := make(chan struct{}, 4)
+
+	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostLog {
+			logEventsMu.Lock()
+			hostLogPayloads = append(hostLogPayloads, string(payload))
+			logEventsMu.Unlock()
+			select {
+			case logSignal <- struct{}{}:
+			default:
+			}
+		}
+		return json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(`{}`)})
+	})
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	// 1. Verify WebUI strictly uses sessionStorage (never localStorage.setItem), visibility throttling, and ?limit=80
+	uiReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/aistudio2api/accounts",
+	})
+	uiRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, uiReq)
+	if err != nil {
+		t.Fatalf("webui handle failed: %v", err)
+	}
+	uiHTML := string(uiRes.(pluginapi.ManagementResponse).Body)
+	if strings.Contains(uiHTML, "localStorage.setItem") {
+		t.Fatal("webui.html must not persist management keys in localStorage")
+	}
+	for _, needle := range []string{"sessionStorage.setItem", "document.hidden", "visibilitychange", "/v0/management/aistudio2api/logs?limit=80"} {
+		if !strings.Contains(uiHTML, needle) {
+			t.Fatalf("expected %q in webui.html", needle)
+		}
+	}
+
+	// 2. Record both an INFO access log and an ERROR access log via rt.Admin.RecordAccessLog,
+	// verifying structured host.log bridging (with model/status/error fields) and ?limit=1 pagination.
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+	rt.Admin.RecordAccessLog(api.AccessLog{
+		RequestID: "req-ok-1",
+		Model:     "gemini-3.8-flash",
+		Method:    http.MethodPost,
+		Path:      "/v1/chat/completions",
+		Status:    http.StatusOK,
+	})
+	rt.Admin.RecordAccessLog(api.AccessLog{
+		RequestID: "req-err-2",
+		Model:     "gemini-4-argon",
+		Method:    http.MethodPost,
+		Path:      "/v1/chat/completions",
+		Status:    http.StatusBadGateway,
+		Error:     "upstream stream interrupted",
+	})
+	select {
+	case <-logSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected runtime WARN/ERROR log to bridge to host.log callback")
+	}
+	logEventsMu.Lock()
+	gotHostLogs := append([]string(nil), hostLogPayloads...)
+	logEventsMu.Unlock()
+	if len(gotHostLogs) == 0 || (!strings.Contains(gotHostLogs[0], `"level":"warn"`) && !strings.Contains(gotHostLogs[0], `"level":"error"`)) {
+		t.Fatalf("unexpected host.log payload: %v", gotHostLogs)
+	}
+
+	allLogs := rt.RecentLogs()
+	if len(allLogs) < 2 {
+		t.Fatalf("expected >= 2 runtime logs, got %d", len(allLogs))
+	}
+	logsReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/aistudio2api/logs?limit=1",
+	})
+	logsRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, logsReq)
+	if err != nil {
+		t.Fatalf("GET /logs?limit=1 failed: %v", err)
+	}
+	var logsBody struct {
+		Logs []any `json:"logs"`
+	}
+	if err := json.Unmarshal(logsRes.(pluginapi.ManagementResponse).Body, &logsBody); err != nil {
+		t.Fatalf("decode /logs?limit=1 response: %v", err)
+	}
+	if len(logsBody.Logs) != 1 {
+		t.Fatalf("expected exactly 1 log entry from ?limit=1, got %d", len(logsBody.Logs))
 	}
 }
