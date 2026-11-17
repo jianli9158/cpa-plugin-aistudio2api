@@ -14,19 +14,21 @@ else ifeq ($(GOOS),windows)
   EXTLDFLAGS :=
 else
   EXT := .so
-  EXTLDFLAGS := -Wl,--version-script=$(CURDIR)/cmd/aistudio2api-plugin/exports_linux.map -Wl,--exclude-libs,ALL -Wl,--gc-sections
+  EXTLDFLAGS := -Wl,--version-script=$(CURDIR)/cmd/aistudio2api-plugin/exports_linux.map -Wl,--gc-sections
   ifeq ($(GOARCH),amd64)
     ifeq ($(LINUX_GLIBC),2.28)
       SM_PLATFORM := linux-amd64-glibc228
     else
       SM_PLATFORM := linux-amd64-gnu
     endif
+  else ifeq ($(GOARCH),arm64)
+    SM_PLATFORM := linux-arm64-glibc228
   else
     SM_PLATFORM := $(GOOS)-$(GOARCH)
   endif
 endif
 
-ifneq (,$(filter windows-arm64 linux-amd64-glibc228,$(SM_PLATFORM)))
+ifneq (,$(filter windows-arm64 linux-amd64-glibc228 linux-arm64-glibc228,$(SM_PLATFORM)))
   SM_URL := https://github.com/jianli9158/cpa-plugin-aistudio2api/releases/download/deps-v1/spidermonkey-$(SPIDERMONKEY_VERSION)-$(SM_PLATFORM).tar.gz
   WEBP_URL := https://github.com/jianli9158/cpa-plugin-aistudio2api/releases/download/deps-v1/libwebp-$(LIBWEBP_VERSION)-$(SM_PLATFORM).tar.gz
 else
