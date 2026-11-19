@@ -10,7 +10,9 @@
 
 #ifdef _WIN32
 #  include <windows.h>
-#  include <intrin.h>
+#  if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#    include <intrin.h>
+#  endif
 #else
 #  include <time.h>
 #endif
@@ -37,10 +39,20 @@ extern "C" double mz_clock_task(void) { return clockBase; }
 static double CyclesPerMillisecond() {
   static const double value = [] {
     auto started = std::chrono::steady_clock::now();
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     unsigned long long counter = __rdtsc();
     while (std::chrono::steady_clock::now() - started < std::chrono::milliseconds(2)) {
     }
     unsigned long long elapsed = __rdtsc() - counter;
+#else
+    ULONG64 counter = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &counter);
+    while (std::chrono::steady_clock::now() - started < std::chrono::milliseconds(2)) {
+    }
+    ULONG64 end = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &end);
+    unsigned long long elapsed = end > counter ? (end - counter) : 1;
+#endif
     return double(elapsed) / std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   }();
   return value;
