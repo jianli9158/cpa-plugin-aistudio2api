@@ -99,3 +99,45 @@ func GenerateFiles(body []byte) []string {
 	}
 	return files
 }
+
+// chatAction 是一轮界面对话在标签页上的操作
+type chatAction int
+
+const (
+	// chatContinue 在页面当前对话后输入提示词并点击 Run
+	chatContinue chatAction = iota
+	// chatNew 先点 New chat 并丢弃当前对话，再输入提示词并点击 Run
+	chatNew
+	// chatRerun 点击最后一轮的 Rerun
+	chatRerun
+)
+
+// nextChatAction 返回页面上一次发出的对话 previous 之后要发出 contents 时的操作
+func nextChatAction(previous, contents []json.RawMessage) chatAction {
+	if len(previous) == 0 {
+		return chatNew
+	}
+	equal := func(left, right []json.RawMessage) bool {
+		if len(left) != len(right) {
+			return false
+		}
+		for index := range left {
+			if !bytes.Equal(left[index], right[index]) {
+				return false
+			}
+		}
+		return true
+	}
+	if equal(previous, contents) {
+		return chatRerun
+	}
+	if len(contents) == len(previous)+2 && equal(previous, contents[:len(previous)]) && contentRole(contents[len(previous)]) == "model" {
+		return chatContinue
+	}
+	return chatNew
+}
+
+// StartsNewChat 返回页面上一次发出的对话 previous 之后要发出 contents 时是否先开新对话
+func StartsNewChat(previous, contents []json.RawMessage) bool {
+	return nextChatAction(previous, contents) == chatNew
+}

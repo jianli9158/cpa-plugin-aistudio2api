@@ -26,12 +26,17 @@ const maxCookieAuthUsers = 10
 // ErrSignedOut 表示 Cookie 打开 AI Studio 时被转到登录页
 var ErrSignedOut = errors.New("Cookie 未登录 AI Studio 或已失效")
 
+// ErrIsolated 表示隔离登录态失效，需要重新建立或导入登录态
+var ErrIsolated = errors.New("隔离登录态失效")
+
 // ErrCredentialsRejected 表示保存的 OAuth 续签材料已失效
 var ErrCredentialsRejected = errors.New("OAuth 续签材料失效")
 
 // accountEmailPattern 匹配 AI Studio 页面全局数据中当前登录账户的邮箱
 var accountEmailPattern = regexp.MustCompile(`"oPEP7c":("(?:[^"\\]|\\.)*")`)
 
+// accountSessionPattern 匹配 AI Studio 页面数据中当前账户所属的登录态标识
+var accountSessionPattern = regexp.MustCompile(`"c7G8BX":("(?:[^"\\]|\\.)*")`)
 // Verification 保存 AI Studio 登录页与模型目录验收结果
 type Verification struct {
 	Email      string
@@ -64,7 +69,7 @@ func VerifyAuthUser(ctx context.Context, state *aistudio.StorageState, proxy str
 	return Verification{Email: email, ModelCount: models}, nil
 }
 
-// CheckAccess 以 Cookie 中第 authUser 个会话打开对话页并读取 GetLoggingContext，Google 拒绝该账户使用 AI Studio 时返回官网跳转页对应的原因，出口地区不受支持不算拒绝
+// CheckAccess 以 Cookie 中第 authUser 个会话打开对话页并读取 GetLoggingContext，Google 拒绝该账户使用 AI Studio 时返回官网跳转页对应的原因，出口地区不受支持不算拒绝；页面注明隔离登录态失效时返回 ErrIsolated
 func CheckAccess(ctx context.Context, state *aistudio.StorageState, proxy string, authUser int) error {
 	client, headers, err := newVerifyClient(ctx, state, proxy)
 	if err != nil {
@@ -178,6 +183,12 @@ func verifyChatPage(ctx context.Context, client *http.Client, state *aistudio.St
 	}
 	var email string
 	if match := accountEmailPattern.FindSubmatch(body); match == nil || json.Unmarshal(match[1], &email) != nil || !strings.Contains(email, "@") {
+		if match := accountSessionPattern.FindSubmatch(body); match != nil {
+			var session string
+			if json.Unmarshal(match[1], &session) == nil && session == "ISOLATED_SESSION" {
+				return "", ErrIsolated
+			}
+		}
 		return "", fmt.Errorf("AI Studio 页面缺少登录账户")
 	}
 	return email, mergeResponseCookies(state, response, targetURL)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
+	"slices"
 	"net/http"
 	"strings"
 	"sync"
@@ -264,6 +264,27 @@ func (manager *accountWorkerManager) expandInBackground(accountID string, modelI
 			manager.proxyFailed(startup.proxy, accountID, err)
 		}
 	}()
+}
+
+// spareForCooling 在热 Worker 账户对模型进入请求不排队等待的长冷却后，峰值未满时在后台为一个对该模型未冷却、没有 Worker 的候选账户启动 Worker，冷却的 Worker 保留给其他模型与指定账户的请求
+func (manager *accountWorkerManager) spareForCooling(ctx context.Context, selection aistudio.AccountSelection, accountID string, until time.Time) {
+	if time.Until(until) <= cooldownQueueLimit {
+		return
+	}
+	warm := manager.WarmAccountIDs()
+	if !slices.Contains(warm, accountID) || len(warm)+manager.openingCount() >= manager.activeLimit() {
+		return
+	}
+	selection.AccountID, selection.ResourceID, selection.PreferredAccountID, selection.IgnoreQuotaCooldown = "", "", "", false
+	groups, err := manager.pool.ClassifyCandidates(ctx, selection, manager.ReadyWarmAccountIDs())
+	if err != nil {
+		return
+	}
+	standby, _ := manager.runtimeAvailable(groups.StandbyReady)
+	standby, _ = manager.withoutOpening(standby)
+	if cold := manager.coldAccounts(standby); len(cold) > 0 {
+		manager.expandInBackground(cold[0], selection.ModelID)
+	}
 }
 
 // backgroundContext 返回后台扩容使用的 context，ResetAll 时取消
@@ -864,7 +885,7 @@ func (manager *accountWorkerManager) PageCatalog(ctx context.Context, accountID 
 			return camoufoxnative.PageCatalog{}, &accountWorkerInitError{err: err, authHandled: true}
 		}
 	}
-	preparer, err := manager.ensureWorker(ctx, accountID, "", true, true)
+	preparer, err := manager.ensureWorker(ctx, accountID, "", true, !aistudio.ResidentCatalog(ctx))
 	if err == nil {
 		return preparer.(*accountWorkerPreparer).worker.PageCatalog(), nil
 	}
@@ -1158,7 +1179,7 @@ func (manager *accountWorkerManager) startReservedWorker(
 				"page_model", bootstrapModel, "duration", time.Since(startedAt))
 			return nil, err
 		}
-		if manager.refresher != nil && !reload && aistudio.DefinitiveAuthenticationFailure(initErr) {
+		if manager.refresher != nil && manager.refresher.Available(ctx) && !reload && aistudio.DefinitiveAuthenticationFailure(initErr) {
 			manager.requests.logStage(label, "INFO", api.LogStage{Name: "WAA Worker 启动"}, "登录态失效，账户认证续签", "error", initErr)
 			return nil, &accountWorkerInitError{err: initErr, proxy: options.Proxy}
 		}
@@ -1737,17 +1758,26 @@ func (manager *accountWorkerManager) fillWarm(ctx context.Context, first chan<- 
 			notify(nil)
 			return
 		}
-		opening := manager.openingOutside(starting)
-		launch := min(1, limit-len(warm)-opening) - len(starting)
+		if len(starting) > 0 {
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+			case result := <-results:
+				collect(result)
+			case <-timer.C:
+			}
+			timer.Stop()
+			continue
+		}
+		opening := manager.openingCount()
+		launch := min(1, limit-len(warm)-opening)
 		groups, err := manager.classifyBootstrapCandidates(ctx, warm)
 		var runtimeBusyErr error
 		if err != nil {
 			failures.Add("", err)
 		} else {
-			skipped := maps.Clone(failedAccounts)
-			maps.Copy(skipped, starting)
-			groups.StandbyReady = excludeAccountIDs(groups.StandbyReady, skipped)
-			groups.StandbyBusy = excludeAccountIDs(groups.StandbyBusy, skipped)
+			groups.StandbyReady = excludeAccountIDs(groups.StandbyReady, failedAccounts)
+			groups.StandbyBusy = excludeAccountIDs(groups.StandbyBusy, failedAccounts)
 			var readyBusyErr, standbyBusyErr error
 			groups.StandbyReady, readyBusyErr = manager.runtimeAvailable(groups.StandbyReady)
 			groups.StandbyBusy, standbyBusyErr = manager.runtimeAvailable(groups.StandbyBusy)
@@ -1764,17 +1794,9 @@ func (manager *accountWorkerManager) fillWarm(ctx context.Context, first chan<- 
 					results <- warmResult{accountID: accountID, err: err}
 				}()
 			}
-		}
-		if len(starting) > 0 {
-			timer := time.NewTimer(100 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-			case result := <-results:
-				collect(result)
-			case <-timer.C:
+			if len(ready) > 0 {
+				continue
 			}
-			timer.Stop()
-			continue
 		}
 		if pendingBusy {
 			if err := waitScheduling(ctx, nil, 100*time.Millisecond); err != nil {
@@ -1821,17 +1843,11 @@ func (manager *accountWorkerManager) fillWarm(ctx context.Context, first chan<- 
 	}
 }
 
-// openingOutside 返回不在 starting 中、正在启动的账户 Worker 数
-func (manager *accountWorkerManager) openingOutside(starting map[string]struct{}) int {
+// openingCount 返回正在启动的账户 Worker 数
+func (manager *accountWorkerManager) openingCount() int {
 	manager.rebalanceMu.Lock()
 	defer manager.rebalanceMu.Unlock()
-	count := 0
-	for accountID := range manager.openings {
-		if _, ok := starting[accountID]; !ok {
-			count++
-		}
-	}
-	return count
+	return len(manager.openings)
 }
 
 type warmResult struct {

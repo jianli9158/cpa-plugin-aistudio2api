@@ -1152,3 +1152,104 @@ func TestWebUISessionStorageLogsLimitAndHostLogBridge(t *testing.T) {
 		t.Fatalf("expected exactly 1 log entry from ?limit=1, got %d", len(logsBody.Logs))
 	}
 }
+
+func TestAuthRequiredParseSkipsStaleCookiesAndRecoversOnNewCookies(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: true\nsync_auth_files: false\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+
+	makeAuthParseReq := func(sapisid string) []byte {
+		payload := map[string]any{
+			"type":       "aistudio2api",
+			"provider":   "aistudio2api",
+			"account_id": "user@example.com",
+			"email":      "user@example.com",
+			"proxy":      "http://127.0.0.1:1",
+			"locale":     "en-US",
+			"timezone":   "UTC",
+			"storage_state": map[string]any{
+				"cookies": []map[string]any{
+					{"name": "SAPISID", "value": sapisid, "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-1PAPISID", "value": sapisid, "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-3PAPISID", "value": sapisid, "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-1PSID", "value": "psid-1", "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-3PSID", "value": "psid-3", "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "SID", "value": "sid-1", "domain": ".google.com", "path": "/", "expires": -1},
+				},
+			},
+		}
+		rawJSON, _ := json.Marshal(payload)
+		req, _ := json.Marshal(pluginapi.AuthParseRequest{
+			FileName: "aistudio2api-user@example.com.json",
+			RawJSON:  rawJSON,
+		})
+		return req
+	}
+
+	res, err := p.HandleMethod(pluginabi.MethodAuthParse, makeAuthParseReq("old-sapisid"))
+	if err != nil {
+		t.Fatalf("initial auth.parse failed: %v", err)
+	}
+	parsed := res.(pluginapi.AuthParseResponse)
+	if !parsed.Handled || parsed.Auth.Disabled {
+		t.Fatalf("expected handled enabled auth on initial parse, got %+v", parsed)
+	}
+
+	poolAcc, ok := rt.Pool().AccountByID("user@example.com")
+	if !ok || poolAcc == nil {
+		t.Fatal("expected account in pool")
+	}
+	poolAcc.State = aistudio.AccountAuthRequired
+
+	// Re-parsing the same dead cookies must preserve AccountAuthRequired and keep host auth disabled.
+	res, err = p.HandleMethod(pluginabi.MethodAuthParse, makeAuthParseReq("old-sapisid"))
+	if err != nil {
+		t.Fatalf("stale auth.parse failed: %v", err)
+	}
+	if poolAcc.State != aistudio.AccountAuthRequired {
+		t.Fatalf("expected AccountAuthRequired preserved for identical cookies, got %s", poolAcc.State)
+	}
+	if staleParsed := res.(pluginapi.AuthParseResponse); !staleParsed.Auth.Disabled {
+		t.Fatalf("expected host auth disabled while AccountAuthRequired, got %+v", staleParsed.Auth)
+	}
+
+	// Host auth.refresh while AccountAuthRequired must also preserve state and stay disabled.
+	refreshReq, _ := json.Marshal(pluginapi.AuthRefreshRequest{
+		AuthID:     "aistudio2api-user@example.com.json",
+		Attributes: map[string]string{"account_id": "user@example.com"},
+	})
+	refreshRes, err := p.HandleMethod(pluginabi.MethodAuthRefresh, refreshReq)
+	if err != nil {
+		t.Fatalf("auth.refresh failed: %v", err)
+	}
+	if refreshed := refreshRes.(pluginapi.AuthRefreshResponse); !refreshed.Auth.Disabled || poolAcc.State != aistudio.AccountAuthRequired {
+		t.Fatalf("expected disabled auth and AccountAuthRequired during auth.refresh, got %+v state=%s", refreshed.Auth, poolAcc.State)
+	}
+
+	// Updating cookies via auth.parse must re-import and clear AccountAuthRequired.
+	res, err = p.HandleMethod(pluginabi.MethodAuthParse, makeAuthParseReq("fresh-sapisid"))
+	if err != nil {
+		t.Fatalf("fresh auth.parse failed: %v", err)
+	}
+	if poolAcc.State == aistudio.AccountAuthRequired {
+		t.Fatalf("expected fresh cookies to clear AccountAuthRequired, got %s", poolAcc.State)
+	}
+}

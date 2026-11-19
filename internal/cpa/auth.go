@@ -298,7 +298,8 @@ func (p *Plugin) upsertAccountInRuntime(
 		return api.AdminAccount{}, err
 	}
 	if accountID != "" && !forceUpdate {
-		if existing, ok := rt.Pool().AccountByID(accountID); ok && existing != nil && existing.State != aistudio.AccountAuthRequired {
+		if existing, ok := rt.Pool().AccountByID(accountID); ok && existing != nil &&
+			(existing.State != aistudio.AccountAuthRequired || sameCoreAuthCookies(existing.StorageState, state)) {
 			accounts, _ := rt.Admin.Accounts(ctx)
 			for _, acc := range accounts {
 				if strings.EqualFold(acc.ID, accountID) {
@@ -540,7 +541,9 @@ func (p *Plugin) handleAuthRefresh(raw []byte) (any, error) {
 		}, nil
 	}
 
-	_, _ = rt.RefreshAccountModels(p.ctx, accountID)
+	if existing, ok := rt.Pool().AccountByID(accountID); !ok || existing == nil || existing.State != aistudio.AccountAuthRequired {
+		_, _ = rt.RefreshAccountModels(p.ctx, accountID)
+	}
 	accounts, _ := rt.Admin.Accounts(p.ctx)
 	for _, acc := range accounts {
 		if strings.EqualFold(acc.ID, accountID) {
