@@ -2,6 +2,7 @@ package waa
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 )
 
 func TestCamouLocaleSanitizationAndContextInit(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	cases := []struct {
 		input string
 		want  [3]string
