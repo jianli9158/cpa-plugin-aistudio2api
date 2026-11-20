@@ -25,6 +25,8 @@ type UpdateStatus struct {
 	CheckedAt   time.Time `json:"checked_at,omitzero"`
 	Error       string    `json:"error,omitempty"`
 	Updating    bool      `json:"updating"`
+	// LogDir 是服务日志目录的绝对路径
+	LogDir string `json:"log_dir"`
 }
 
 func (s *server) registerUpdates(mux *http.ServeMux) {

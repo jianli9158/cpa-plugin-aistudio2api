@@ -7,14 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Mag1cFall/AIStudio2API/internal/egress"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	PluginID      = "aistudio2api"
-	PluginVersion = "1.2.10"
+	PluginVersion = "1.2.11"
 	ProviderID    = "aistudio2api"
 )
 
@@ -210,7 +209,6 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 		}
 	}
 	_ = os.MkdirAll(accountsDir, 0o700)
-	egress.SetCacheDir(filepath.Join(dataDir, "geoip"))
 
 	waaBackend := strings.ToLower(strings.TrimSpace(pcfg.WAABackend))
 	if waaBackend == "" {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"sync"
@@ -692,15 +693,17 @@ func (runtime *Runtime) Settle(ctx context.Context) error {
 	}
 }
 
-// action 是一次界面操作中的一步：after 为与上一步的 VM 时钟间隔，run 在事件循环中执行这一步，span 与 pace 见 timedJob
+// action 是一次界面操作中的一步：after 为与上一步的 VM 时钟间隔，run 在事件循环中执行这一步，span 与 pace 见 timedJob，holds 与 frees 是这一步按下与抬起的指针或按键
 type action struct {
 	after time.Duration
 	run   func() error
 	span  float64
 	pace  float64
+	holds string
+	frees string
 }
 
-// perform 把 actions 按各自的间隔排进 VM 此前的空闲区间并等到最后一步执行完：VM 空闲足够长时各步不真实等待，不够时只等差额；一步出错或 ctx 结束后其余各步不再执行
+// perform 把 actions 按各自的间隔排进 VM 此前的空闲区间并等到最后一步执行完：VM 空闲足够长时各步不真实等待，不够时只等差额；一步出错或 ctx 结束后立即抬起已按下的指针与按键，其余各步不再执行，也不推进 VM 时钟
 func (runtime *Runtime) perform(ctx context.Context, actions []action) error {
 	return runtime.performFitted(ctx, func(float64) []action { return actions })
 }
@@ -709,21 +712,51 @@ func (runtime *Runtime) perform(ctx context.Context, actions []action) error {
 func (runtime *Runtime) performFitted(ctx context.Context, build func(idle float64) []action) error {
 	result := make(chan error, 1)
 	failed := false
+	var actions []action
+	done := 0
+	// release 返回其余各步中抬起已按下、还没有抬起的指针与按键的各步，只在事件循环中调用
+	release := func() []action {
+		held := map[string]bool{}
+		for _, item := range actions[:done] {
+			if item.holds != "" {
+				held[item.holds] = true
+			}
+			delete(held, item.frees)
+		}
+		var pending []action
+		for _, item := range actions[done:] {
+			if held[item.frees] {
+				delete(held, item.frees)
+				pending = append(pending, item)
+			}
+		}
+		return pending
+	}
+	// stop 在事件循环中停止其余各步，并依次执行 release 给出的各步
+	stop := func() error {
+		failed = true
+		var errs []error
+		for _, item := range release() {
+			errs = append(errs, item.run())
+		}
+		if err := errors.Join(errs...); err != nil {
+			return fmt.Errorf("抬起按下的指针与按键: %w", err)
+		}
+		return nil
+	}
 	if !runtime.loop.arrange(func(idle float64) []timedJob {
-		actions := build(idle)
+		actions = build(idle)
 		jobs := make([]timedJob, len(actions))
 		for index, item := range actions {
-			jobs[index] = timedJob{after: item.after, span: item.span, pace: item.pace, job: func() {
-				if failed {
+			jobs[index] = timedJob{after: item.after, span: item.span, pace: item.pace, halt: &failed, job: func() {
+				if err := ctx.Err(); err != nil {
+					result <- errors.Join(err, stop())
 					return
 				}
-				err := ctx.Err()
-				if err == nil {
-					err = item.run()
-				}
+				err := item.run()
+				done = index + 1
 				if err != nil {
-					failed = true
-					result <- err
+					result <- errors.Join(err, stop())
 					return
 				}
 				if index == len(actions)-1 {
@@ -741,6 +774,22 @@ func (runtime *Runtime) performFitted(ctx context.Context, build func(idle float
 	case <-runtime.loop.done:
 		return errors.New("WAA runtime 已关闭")
 	case <-ctx.Done():
+		// 停止其余各步与抬起按下的指针与按键都排在取消时刻，此后排进事件循环的操作都在它们之后
+		at := mozjs.Now()
+		runtime.loop.push(&task{at: at, host: true, job: func() {
+			if failed || done == len(actions) || len(release()) == 0 {
+				failed = true
+				return
+			}
+			runtime.loop.push(&task{at: at, job: func() {
+				if failed {
+					return
+				}
+				if err := stop(); err != nil {
+					slog.Warn("取消界面操作后抬起按下的指针与按键失败", "error", err)
+				}
+			}})
+		}})
 		return ctx.Err()
 	}
 }
@@ -946,6 +995,11 @@ func (runtime *Runtime) pasteInto(target string, text string) []action {
 			}
 			return nil
 		}}
+		if key, ok := strings.CutPrefix(step.types[0], "keydown:"); ok {
+			actions[index].holds = key
+		} else if key, ok := strings.CutPrefix(step.types[0], "keyup:"); ok {
+			actions[index].frees = key
+		}
 	}
 	return actions
 }
@@ -1029,6 +1083,12 @@ func (runtime *Runtime) pointerActions(steps []pointerStep) []action {
 	actions := make([]action, len(steps))
 	for index, step := range steps {
 		actions[index] = action{after: step.delay, run: func() error { return runtime.pointerInput(step) }}
+		switch step.action {
+		case "press":
+			actions[index].holds = "mouse"
+		case "release":
+			actions[index].frees = "mouse"
+		}
 	}
 	return actions
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/cpa"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginabi"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginapi"
@@ -1251,5 +1252,160 @@ func TestAuthRequiredParseSkipsStaleCookiesAndRecoversOnNewCookies(t *testing.T)
 	}
 	if poolAcc.State == aistudio.AccountAuthRequired {
 		t.Fatalf("expected fresh cookies to clear AccountAuthRequired, got %s", poolAcc.State)
+	}
+}
+
+func TestManagementAccountStateRestoreAndAuthSync(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	authDir := filepath.Join(tmpDir, ".cli-proxy-api")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("mkdir authDir: %v", err)
+	}
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: true\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+
+	payload := map[string]any{
+		"type":       "aistudio2api",
+		"provider":   "aistudio2api",
+		"account_id": "restore@example.com",
+		"email":      "restore@example.com",
+		"proxy":      "http://127.0.0.1:1",
+		"locale":     "en-US",
+		"timezone":   "UTC",
+		"storage_state": map[string]any{
+			"cookies": []map[string]any{
+				{"name": "SAPISID", "value": "sap-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-1PAPISID", "value": "sap-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-3PAPISID", "value": "sap-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-1PSID", "value": "psid-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-3PSID", "value": "psid-3", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "SID", "value": "sid-1", "domain": ".google.com", "path": "/", "expires": -1},
+			},
+		},
+	}
+	rawJSON, _ := json.Marshal(payload)
+	parseReq, _ := json.Marshal(pluginapi.AuthParseRequest{
+		FileName: "aistudio2api-restore@example.com.json",
+		RawJSON:  rawJSON,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodAuthParse, parseReq); err != nil {
+		t.Fatalf("auth.parse failed: %v", err)
+	}
+
+	if err := rt.Pool().MarkRestricted("restore@example.com", &camoufoxnative.AccessDenial{Err: camoufoxnative.ErrServiceRestricted}); err != nil {
+		t.Fatalf("MarkRestricted failed: %v", err)
+	}
+	if p.ShouldPinExecutorAccount(t.Context(), rt, "restore@example.com", "gemini-3.8-flash") {
+		t.Fatal("expected restricted account not to be pinned")
+	}
+	authFilePath := filepath.Join(authDir, "aistudio2api-restore@example.com.json")
+	checkHostDisabled := func(want bool) {
+		t.Helper()
+		raw, err := os.ReadFile(authFilePath)
+		if err != nil {
+			t.Fatalf("read host auth file: %v", err)
+		}
+		var doc struct {
+			Disabled bool `json:"disabled"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("decode host auth file: %v", err)
+		}
+		if doc.Disabled != want {
+			t.Fatalf("host auth disabled = %v, want %v (json=%s)", doc.Disabled, want, string(raw))
+		}
+	}
+	checkHostDisabled(true)
+
+	callState := func(state string) (pluginapi.ManagementResponse, api.AdminAccount) {
+		body, _ := json.Marshal(map[string]string{
+			"account_id": "restore@example.com",
+			"state":      state,
+		})
+		req, _ := json.Marshal(pluginapi.ManagementRequest{
+			Method: http.MethodPost,
+			Path:   "/v0/management/aistudio2api/accounts/state",
+			Body:   body,
+		})
+		res, err := p.HandleMethod(pluginabi.MethodManagementHandle, req)
+		if err != nil {
+			t.Fatalf("accounts/state call failed: %v", err)
+		}
+		mres := res.(pluginapi.ManagementResponse)
+		var out struct {
+			Account api.AdminAccount `json:"account"`
+		}
+		_ = json.Unmarshal(mres.Body, &out)
+		return mres, out.Account
+	}
+
+	poolAcc, ok := rt.Pool().AccountByID("restore@example.com")
+	if !ok || poolAcc == nil {
+		t.Fatal("expected restore@example.com in pool")
+	}
+	isReadyOrSyncing := func(state string) bool {
+		return state == string(aistudio.AccountReady) || state == "busy"
+	}
+
+	// Restore restricted -> ready: clears restriction, syncs host auth disabled=false, restores pinning.
+	res, acc := callState("ready")
+	if res.StatusCode != http.StatusOK || !acc.Enabled || !isReadyOrSyncing(acc.State) || poolAcc.State != aistudio.AccountReady {
+		t.Fatalf("expected restored ready account, status=%d acc=%+v poolState=%s body=%s", res.StatusCode, acc, poolAcc.State, string(res.Body))
+	}
+	checkHostDisabled(false)
+	if !p.ShouldPinExecutorAccount(t.Context(), rt, "restore@example.com", "gemini-3.8-flash") {
+		t.Fatal("expected restored account to be pinned again")
+	}
+
+	// Disable via accounts/state -> disabled.
+	res, acc = callState("disabled")
+	if res.StatusCode != http.StatusOK || acc.Enabled || acc.State != "disabled" {
+		t.Fatalf("expected disabled account, status=%d acc=%+v body=%s", res.StatusCode, acc, string(res.Body))
+	}
+	checkHostDisabled(true)
+
+	// Re-enable & restore via accounts/state -> ready.
+	res, acc = callState("ready")
+	if res.StatusCode != http.StatusOK || !acc.Enabled || !isReadyOrSyncing(acc.State) || poolAcc.State != aistudio.AccountReady {
+		t.Fatalf("expected re-enabled ready account, status=%d acc=%+v poolState=%s body=%s", res.StatusCode, acc, poolAcc.State, string(res.Body))
+	}
+	checkHostDisabled(false)
+	// Invalid state must return 400.
+	res, _ = callState("bogus")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid state, got %d body=%s", res.StatusCode, string(res.Body))
+	}
+
+	// Verify WebUI renders the restore-account action and status/account transition hints.
+	uiReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/aistudio2api/accounts",
+	})
+	uiRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, uiReq)
+	if err != nil {
+		t.Fatalf("webui handle failed: %v", err)
+	}
+	uiHTML := string(uiRes.(pluginapi.ManagementResponse).Body)
+	for _, needle := range []string{"restore-account", "/v0/management/aistudio2api/accounts/state", "transitionLabels", "catalog_error"} {
+		if !strings.Contains(uiHTML, needle) {
+			t.Fatalf("expected %q in webui.html", needle)
+		}
 	}
 }

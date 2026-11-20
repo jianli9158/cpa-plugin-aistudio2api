@@ -20,7 +20,6 @@ require (
 	github.com/mewkiz/flac v1.0.14
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/nlnwa/whatwg-url v0.6.2
-	github.com/oschwald/maxminddb-golang/v2 v2.9.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/thesyncim/gopus v0.2.3
 	github.com/tidwall/gjson v1.20.0

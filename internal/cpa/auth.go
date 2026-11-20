@@ -196,7 +196,7 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 					imported = updated
 				}
 				if wantEnabled {
-					go func() { _ = rt.EnsureRunning(p.ctx) }()
+					p.startRuntimeAsync(rt)
 				}
 			}
 		}
@@ -379,7 +379,8 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	// Immediately launch the local Chrome Incognito window in the background when the user clicks "Start Login" in ECPA
 	if os.Getenv("AISTUDIO2API_NO_AUTO_BROWSER") == "" {
 		if chromeBin, _ := aistudio.FindLocalChromeBinary(); chromeBin != "" && p.chromeLogin.TryLock() {
-			go func(state string, proxy string, cbID string) {
+			loginCtx := p.pluginCtx()
+			go func(ctx context.Context, state string, proxy string, cbID string) {
 				defer p.chromeLogin.Unlock()
 				defer func() {
 					if r := recover(); r != nil {
@@ -391,7 +392,7 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 						p.loginStateMu.Unlock()
 					}
 				}()
-				created, loginErr := rt.Admin.CreateAccount(p.ctx, api.AccountCreateInput{
+				created, loginErr := rt.Admin.CreateAccount(ctx, api.AccountCreateInput{
 					Proxy: proxy,
 				}, nil)
 
@@ -410,9 +411,9 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 
 				if loginErr == nil {
 					_ = p.SyncAccountToHostAuth(cbID, created)
-					go func() { _ = rt.EnsureRunning(p.ctx) }()
+					p.startRuntimeAsync(rt)
 				}
-			}(stateID, proxyURL, hostCallbackID)
+			}(loginCtx, stateID, proxyURL, hostCallbackID)
 		}
 	}
 

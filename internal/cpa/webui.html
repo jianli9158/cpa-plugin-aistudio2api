@@ -857,10 +857,23 @@ async function loadStatus() {
     badge.className = 'badge ' + (isRunning ? 'success' : 'warning');
 
     const toggleBtn = document.getElementById('serviceToggleBtn');
+    const transitionLabels = {
+      probe_proxies: '检测代理池',
+      wait_catalog: '读取模型目录',
+      start_prewarm: '预热 Worker',
+      cancel_requests: '停止在途请求',
+      wait_catalog_stop: '停止目录同步',
+      close_workers: '关闭 Worker'
+    };
+    const serverOffsetMs = st.time ? (Date.now() - new Date(st.time).getTime()) : 0;
+    window.__cpaServerOffsetMs = isNaN(serverOffsetMs) ? 0 : serverOffsetMs;
     if (toggleBtn) {
       toggleBtn.dataset.running = isRunning ? 'true' : 'false';
+      const stepText = st.transition ? (transitionLabels[st.transition] || st.transition) : '';
+      const elapsedText = st.transition_since ? formatTransitionElapsed(st.transition_since) : '';
+      const stepSuffix = stepText ? (' (' + stepText + (elapsedText ? ' ' + elapsedText : '') + ')') : '';
       if (state === 'LAUNCHING' || state === 'STOPPING') {
-        toggleBtn.textContent = state === 'LAUNCHING' ? '启动中...' : '停止中...';
+        toggleBtn.textContent = (state === 'LAUNCHING' ? '启动中' : '停止中') + stepSuffix + '...';
         toggleBtn.className = 'secondary sm';
         toggleBtn.disabled = true;
       } else if (isRunning) {
@@ -949,6 +962,18 @@ function formatCooldownRemaining(untilStr) {
   return '剩余 ' + s + '秒';
 }
 
+function formatTransitionElapsed(sinceStr) {
+  if (!sinceStr) return '';
+  const sinceMs = new Date(sinceStr).getTime();
+  if (isNaN(sinceMs)) return '';
+  const offset = Number(window.__cpaServerOffsetMs || 0);
+  const sec = Math.max(0, Math.floor((Date.now() - offset - sinceMs) / 1000));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m + 'm' + String(s).padStart(2, '0') + 's';
+}
+
 function renderAccounts(accounts, cooldowns) {
   const tbody = document.getElementById('accountsBody');
   if (!accounts.length) {
@@ -1011,8 +1036,9 @@ function renderAccounts(accounts, cooldowns) {
         '</div>'
       );
     }
-    const rawMsg = acc.message || acc.cooldown_reason || acc.auth_error || acc.catalog_error || '';
-    const hasLockConflict = [rawMsg, ...accCooldowns.map(c => c.reason || '')].some(
+    const rawMsg = acc.message || acc.cooldown_reason || acc.auth_error || '';
+    const catalogErr = acc.catalog_error || '';
+    const hasLockConflict = [rawMsg, catalogErr, ...accCooldowns.map(c => c.reason || '')].some(
       m => m && (m.includes('另一个 AIStudio2API runtime') || m.includes('其他进程占用') || m.includes('账户正在使用'))
     );
     if (hasLockConflict) {
@@ -1038,17 +1064,39 @@ function renderAccounts(accounts, cooldowns) {
     } else if (rawMsg && !accCooldowns.some(c => c.reason === rawMsg)) {
       detailParts.push('<div style="color:var(--muted); font-size:12px; max-width:260px;">' + escapeHtml(rawMsg) + '</div>');
     }
+    if (catalogErr && !rawMsg) {
+      const isWarningOnly = Array.isArray(acc.models) && acc.models.length > 0;
+      detailParts.push(
+        '<div class="cooldown-pill-box" style="border-color:' + (isWarningOnly ? 'rgba(245,158,11,0.35)' : 'var(--danger-border)') + '; background:' + (isWarningOnly ? 'rgba(245,158,11,0.1)' : 'var(--danger-bg)') + ';">' +
+          '<div class="cooldown-pill-top"><strong style="color:' + (isWarningOnly ? '#fcd34d' : '#fca5a5') + ';">' + (isWarningOnly ? '目录同步提示' : '目录同步失败') + '</strong></div>' +
+          '<div class="cooldown-pill-reason" style="color:' + (isWarningOnly ? '#fde68a' : '#fecaca') + ';">' + escapeHtml(catalogErr) + '</div>' +
+        '</div>'
+      );
+    }
     const detailHtml = detailParts.length ? detailParts.join('') : '<span style="color:var(--muted);">正常就绪</span>';
 
+    const canRestore = !acc.enabled || acc.state === 'restricted' || acc.state === 'auth_required' || hasCooldown;
+    const restoreBtn = canRestore
+      ? '<button class="success sm" data-action="restore-account" data-id="' + escapeHtml(acc.id) + '">恢复就绪</button>'
+      : '';
     const clearCooldownBtn = hasCooldown
       ? '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(acc.id) + '" data-scope="">清除冷却</button>'
       : '';
 
     const tierText = (acc.benefit_tier || 'FREE').toUpperCase();
     const tierBadgeClass = tierText.includes('PRO') || tierText.includes('PAID') || tierText.includes('ULTRA') ? 'accent' : '';
-    const transitionHint = acc.transition === 'draining'
-      ? ' <span class="badge warning" style="font-size:10px; padding:1px 6px;">排空中</span>'
-      : (acc.transition === 'syncing' ? ' <span class="badge accent" style="font-size:10px; padding:1px 6px;">同步中</span>' : '');
+    const accTransitionLabels = { draining: '排空中', syncing: '同步中', saving: '保存中', refreshing: '刷新中' };
+    const accStepLabels = { waiting: '等待请求', catalog: '读取目录', verifying: '核对验证' };
+    let transitionHint = '';
+    if (acc.transition) {
+      const tLabel = accTransitionLabels[acc.transition] || acc.transition;
+      const sLabel = acc.transition_step ? (accStepLabels[acc.transition_step] || acc.transition_step) : '';
+      const stepNum = (acc.transition_index > 0 && acc.transition_total > 0) ? (' ' + acc.transition_index + '/' + acc.transition_total) : '';
+      const elapsed = acc.transition_since ? (' ' + formatTransitionElapsed(acc.transition_since)) : '';
+      const badgeCls = acc.transition === 'draining' ? 'warning' : 'accent';
+      transitionHint = ' <span class="badge ' + badgeCls + '" style="font-size:10px; padding:1px 6px;">' +
+        escapeHtml(tLabel + (sLabel ? '·' + sLabel : '') + stepNum + elapsed) + '</span>';
+    }
     const activeHint = acc.active_requests > 0
       ? ' <span class="badge accent" style="font-size:10px; padding:1px 6px;">并发 ' + Number(acc.active_requests) + '</span>'
       : '';
@@ -1061,6 +1109,7 @@ function renderAccounts(accounts, cooldowns) {
       '<td>' + proxyCell + '</td>' +
       '<td>' + detailHtml + '</td>' +
       '<td><div style="display:flex; gap:6px; flex-wrap:nowrap; align-items:center;">' +
+        restoreBtn +
         clearCooldownBtn +
         '<button class="sm" data-action="relogin-account" data-id="' + escapeHtml(acc.id) + '">无痕重登</button>' +
         '<button class="secondary sm" data-action="refresh-account" data-id="' + escapeHtml(acc.id) + '">刷新目录</button>' +
@@ -1359,6 +1408,17 @@ async function toggleAccount(id, enabled) {
   }
 }
 
+async function restoreAccount(id) {
+  try {
+    await apiCall('/v0/management/aistudio2api/accounts/state', 'POST', { account_id: id, state: 'ready' });
+    showToast('已将账户 ' + id + ' 恢复为就绪状态', false);
+    await loadStatus();
+    loadLogs();
+  } catch (e) {
+    showToast('恢复就绪失败: ' + e.message, true);
+  }
+}
+
 async function deleteAccount(id) {
   if (!confirm('确认删除账户 ' + id + ' 吗？')) return;
   try {
@@ -1500,6 +1560,7 @@ document.addEventListener('click', e => {
     case 'relogin-account': reloginAccount(id); break;
     case 'refresh-account': refreshAccount(id); break;
     case 'toggle-account': toggleAccount(id, btn.dataset.enabled === 'true'); break;
+    case 'restore-account': restoreAccount(id); break;
     case 'delete-account': deleteAccount(id); break;
   }
 });

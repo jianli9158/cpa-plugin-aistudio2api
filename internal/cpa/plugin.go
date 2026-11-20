@@ -145,6 +145,21 @@ func (p *Plugin) Config() PluginConfig {
 	return p.pluginCfg
 }
 
+func (p *Plugin) pluginCtx() context.Context {
+	p.mu.RLock()
+	ctx := p.ctx
+	p.mu.RUnlock()
+	return ctx
+}
+
+func (p *Plugin) startRuntimeAsync(rt *app.PluginRuntime) {
+	if rt == nil {
+		return
+	}
+	ctx := p.pluginCtx()
+	go func() { _ = rt.EnsureRunning(ctx) }()
+}
+
 func (p *Plugin) cachedModelMappings() []config.ModelAlias {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

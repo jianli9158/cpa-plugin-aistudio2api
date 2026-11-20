@@ -28,6 +28,7 @@ type generationAdmin interface {
 	Status(context.Context) (api.AdminStatus, error)
 	CatalogModels(context.Context) ([]aistudio.Model, error)
 	Accounts(context.Context) ([]api.AdminAccount, error)
+	AccountsChanged() <-chan struct{}
 	AccountExits(context.Context) ([]api.AccountExit, error)
 	CreateAccount(context.Context, api.AccountCreateInput, *camoufoxnative.LiveView) (api.AdminAccount, error)
 	ChromeImportProfiles(context.Context) ([]api.ChromeImportProfile, error)
@@ -37,6 +38,7 @@ type generationAdmin interface {
 	ImportAccountState(context.Context, api.AccountStateInput) (api.AdminAccount, error)
 	RenewAccountCookies(ctx context.Context, accountID string, token string, cookies []aistudio.StateCookie) (api.AdminAccount, error)
 	UpdateAccount(context.Context, string, api.AccountInput) (api.AdminAccount, error)
+	SetAccountState(ctx context.Context, accountID string, state string) (api.AdminAccount, error)
 	DeleteAccount(context.Context, string) error
 	LoginAccount(context.Context, string, *camoufoxnative.LiveView) (api.AdminAccount, error)
 	RefreshAccount(context.Context, string) (api.AdminAccountRefresh, error)
@@ -559,6 +561,13 @@ func (manager *runtimeManager) Accounts(ctx context.Context) ([]api.AdminAccount
 	return current.admin.Accounts(ctx)
 }
 
+// AccountsChanged 返回当前生成服务账户的租约或状态下一次变化时关闭的通道
+func (manager *runtimeManager) AccountsChanged() <-chan struct{} {
+	current, done := manager.generation()
+	defer done()
+	return current.admin.AccountsChanged()
+}
+
 // AccountExits 查询当前生成服务各账户出口的公网 IP 与地理位置
 func (manager *runtimeManager) AccountExits(ctx context.Context) ([]api.AccountExit, error) {
 	current, done := manager.generation()
@@ -635,6 +644,11 @@ func (manager *runtimeManager) RenewAccountCookies(ctx context.Context, accountI
 // UpdateAccount 在当前生成服务更新账户，保存结果时取账户读锁，之后同步模型目录不阻止生成服务换代
 func (manager *runtimeManager) UpdateAccount(ctx context.Context, id string, input api.AccountInput) (api.AdminAccount, error) {
 	return manager.currentAdmin().UpdateAccount(ctx, id, input)
+}
+
+// SetAccountState 在当前生成服务把账户改为就绪或停用
+func (manager *runtimeManager) SetAccountState(ctx context.Context, id string, state string) (api.AdminAccount, error) {
+	return manager.currentAdmin().SetAccountState(ctx, id, state)
 }
 // DeleteAccount 在当前生成服务删除账户
 func (manager *runtimeManager) DeleteAccount(ctx context.Context, id string) error {
