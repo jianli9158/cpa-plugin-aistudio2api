@@ -69,13 +69,15 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config) (*PluginRuntime, e
 		}
 	}
 	handler := api.NewHandler(mgr, api.Config{
-		Admin:          mgr,
-		MediaDir:       mediaDir,
-		MediaLinks:     mgr.mediaLinks,
-		ResponseModes:  mgr.responseModes,
-		SearchSettings: mgr.searchSettings,
-		WaitLaunch:     mgr.WaitLaunch,
-		EgressProxy:    mgr.egressProxy,
+		Admin:               mgr,
+		MediaDir:            mediaDir,
+		MediaLinks:          mgr.mediaLinks,
+		ResponseModes:       mgr.responseModes,
+		SearchSettings:      mgr.searchSettings,
+		WaitLaunch:          mgr.WaitLaunch,
+		EgressProxy:         mgr.egressProxy,
+		AllowedMCPHosts:     mgr.allowedMCPHosts,
+		AllowedWebhookHosts: mgr.allowedWebhookHosts,
 	})
 	rt := &PluginRuntime{
 		Manager: mgr,
@@ -89,6 +91,18 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config) (*PluginRuntime, e
 		}()
 	}
 	return rt, nil
+}
+
+func (manager *runtimeManager) allowedMCPHosts() string {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.activeManagement.AllowedMCPHosts
+}
+
+func (manager *runtimeManager) allowedWebhookHosts() string {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.activeManagement.AllowedWebhookHosts
 }
 
 // PublicHandler returns the HTTP handler for OpenAI, Responses, Anthropic, and Gemini endpoints.

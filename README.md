@@ -65,12 +65,12 @@ flowchart LR
 
 ### 方式二：从 GitHub Releases 下载预编译包
 1. 前往 [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases) 下载对应平台的压缩包：
-   - macOS Apple Silicon: `aistudio2api_1.2.11_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.11_darwin_amd64.zip`
-   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.11_linux_amd64.zip`
-   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.11_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.11_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.11_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.12_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.12_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.12_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.12_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.12_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.12_windows_arm64.zip`
 2. 解压出动态库文件（`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`），放入 CLIProxyAPI 的插件目录：
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
@@ -144,6 +144,8 @@ plugins:
 | `first_event_hedge` | `string` | `"auto"` | 首包超时并发备用请求策略（`auto` 按近期首包耗时自适应，或填写秒数如 `"6s"`，`off` 关闭） |
 | `first_event_hedge_models` | `string` | `"gemini-4-argon"` | 启用首包并发备用请求的目标模型列表（逗号分隔，`*` 表示全部模型） |
 | `enable_assistant_models` | `bool` | `false` | 是否开启高风控 `-build` 写代码助手通道（默认关闭以防账号被 Google 封禁，仅建议测试账号开启） |
+| `allowed_mcp_hosts` | `string` | `""` | 管理员允许宿主连接的受信任 MCP 服务器主机/源白名单（逗号分隔，例如 `mcp.example.com,*.trusted.example.com`；默认留空禁用宿主侧 MCP 连接，并始终禁止非公网 IP 与非白名单重定向） |
+| `allowed_webhook_hosts` | `string` | `""` | 管理员允许投递后台交互 Webhook 的受信任主机/源白名单（逗号分隔；默认留空禁用 Webhook 出站投递，并始终禁止非公网 IP 与重定向） |
 
 ---
 

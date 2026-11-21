@@ -3,11 +3,13 @@ package cpa_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1407,5 +1409,99 @@ func TestManagementAccountStateRestoreAndAuthSync(t *testing.T) {
 		if !strings.Contains(uiHTML, needle) {
 			t.Fatalf("expected %q in webui.html", needle)
 		}
+	}
+}
+
+func TestExecutorResponsesMCPSSRFBlockedEndToEnd(t *testing.T) {
+	var hits atomic.Int32
+	victim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"secret":"host-management-api"}`))
+	}))
+	defer victim.Close()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	regRes, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq)
+	if err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	// Verify allowed_mcp_hosts and allowed_webhook_hosts are exposed in ConfigFields and default to empty (deny-all).
+	rawReg, _ := json.Marshal(regRes)
+	var parsedReg struct {
+		Metadata pluginapi.Metadata `json:"metadata"`
+	}
+	if err := json.Unmarshal(rawReg, &parsedReg); err != nil {
+		t.Fatalf("decode registration: %v", err)
+	}
+	foundFields := map[string]any{}
+	for _, f := range parsedReg.Metadata.ConfigFields {
+		foundFields[f.Name] = f.Default
+	}
+	for _, key := range []string{"allowed_mcp_hosts", "allowed_webhook_hosts"} {
+		def, ok := foundFields[key]
+		if !ok {
+			t.Fatalf("expected ConfigField %q in registration metadata", key)
+		}
+		if def != "" {
+			t.Fatalf("expected ConfigField %q default to be empty string, got %#v", key, def)
+		}
+	}
+
+	// End-to-end executor.execute -> /v1/responses -> MCP SSRF probe must be blocked with 0 hits.
+	payload := []byte(`{"model":"gemini-3.8-flash","input":"probe","tools":[{"type":"mcp","server_label":"cpa","server_url":"` + victim.URL + `","headers":{"Authorization":"Bearer mgmt-key"}}]}`)
+	execReq, _ := json.Marshal(pluginapi.ExecutorRequest{
+		Model:   "gemini-3.8-flash",
+		Format:  "responses",
+		Payload: payload,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodExecutorExecute, execReq); err == nil {
+		t.Fatal("expected executor.execute Responses MCP SSRF probe to fail, got nil error")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("expected 0 outbound hits to loopback victim via executor.execute, got %d", hits.Load())
+	}
+
+	// Verify executor.http_request blocks /api path traversal (/v1/../api/status) with 403.
+	httpReq, _ := json.Marshal(pluginapi.ExecutorHTTPRequest{
+		Method: http.MethodGet,
+		URL:    "/v1/../api/status",
+	})
+	httpRes, err := p.HandleMethod(pluginabi.MethodExecutorHTTPRequest, httpReq)
+	if err != nil {
+		t.Fatalf("executor.http_request failed: %v", err)
+	}
+	if got := httpRes.(pluginapi.ExecutorHTTPResponse).StatusCode; got != http.StatusForbidden {
+		t.Fatalf("expected 403 for /v1/../api/status path traversal, got %d", got)
+	}
+
+	// Verify live reload updates allowed_mcp_hosts without still allowing loopback.
+	reloadReq, _ := json.Marshal(map[string]any{
+		"config_yaml": []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\nallowed_mcp_hosts: \"mcp.trusted.example\"\n"),
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginReconfigure, reloadReq); err != nil {
+		t.Fatalf("plugin.reconfigure failed: %v", err)
+	}
+	if got := p.Config().AllowedMCPHosts; got != "mcp.trusted.example" {
+		t.Fatalf("expected AllowedMCPHosts=mcp.trusted.example after reload, got %q", got)
+	}
+	if _, err := p.HandleMethod(pluginabi.MethodExecutorExecute, execReq); err == nil {
+		t.Fatal("expected loopback MCP SSRF probe to remain blocked after reload")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("expected 0 outbound hits after reload, got %d", hits.Load())
 	}
 }

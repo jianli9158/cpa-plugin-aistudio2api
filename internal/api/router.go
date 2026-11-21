@@ -39,6 +39,10 @@ type Config struct {
 	WaitLaunch func(context.Context)
 	// EgressProxy 返回服务连接外部 MCP 服务器所用的出口代理，空串为直连
 	EgressProxy func() string
+	// AllowedMCPHosts 返回管理员允许宿主连接的 MCP 主机/源白名单（逗号分隔，为空时默认拒绝全部宿主侧 MCP 连接）
+	AllowedMCPHosts func() string
+	// AllowedWebhookHosts 返回管理员允许投递后台交互 Webhook 的主机/源白名单（逗号分隔，为空时默认拒绝全部 Webhook 投递）
+	AllowedWebhookHosts func() string
 	// States 持久保存 Responses、Interactions 与 Chat 音频回复的续接节点，为空时只保存在内存中
 	States StateStore
 }

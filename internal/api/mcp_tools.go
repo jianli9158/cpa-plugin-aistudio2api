@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,19 +18,22 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 )
 
-// mcpHeaderTransport 为发往 MCP 服务器主机的请求加上请求给出的头，schemas 不为 nil 时从响应中记下 tools/list 结果里各工具原样的 inputSchema
+// mcpHeaderTransport 仅向与初始验证目标同源（scheme + host + port）的 MCP 请求附加请求头，跨源重定向时清除自定义头，schemas 不为 nil 时记下 tools/list 原始 inputSchema
 type mcpHeaderTransport struct {
 	base    http.RoundTripper
-	host    string
+	origin  *url.URL
 	headers map[string]string
 	schemas *mcpToolSchemas
 }
 
 func (t mcpHeaderTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.URL.Host != t.host {
+	request = request.Clone(request.Context())
+	if !sameURLOrigin(request.URL, t.origin) {
+		for name := range t.headers {
+			request.Header.Del(name)
+		}
 		return t.base.RoundTrip(request)
 	}
-	request = request.Clone(request.Context())
 	for name, value := range t.headers {
 		request.Header.Set(name, value)
 	}
@@ -159,27 +163,44 @@ func (s *server) resolveMCPTools(ctx context.Context, request aistudio.GenerateR
 	return request, nil
 }
 
-// connectMCP 经出口代理以服务器的 URL 与头连接 MCP 服务器，连接错误以随后调用的方法名说明；schemas 不为 nil 时记下 tools/list 结果中原样的 inputSchema
-func (s *server) connectMCP(ctx context.Context, server aistudio.MCPServer, method string, schemas *mcpToolSchemas) (*mcp.ClientSession, error) {
-	base := http.DefaultTransport.(*http.Transport).Clone()
-	base.Proxy = nil
-	if s.config.EgressProxy != nil {
-		if proxy := s.config.EgressProxy(); proxy != "" {
-			proxyURL, err := url.Parse(proxy)
-			if err != nil {
-				return nil, fmt.Errorf("mcp server %q egress proxy: %w", server.Name, err)
-			}
-			base.Proxy = http.ProxyURL(proxyURL)
-		}
+// mcpOutboundValidator 返回受管理员白名单与公网 IP/重定向策略约束的 MCP 出站校验器
+func (s *server) mcpOutboundValidator() outboundValidator {
+	raw := ""
+	if s != nil && s.config.AllowedMCPHosts != nil {
+		raw = s.config.AllowedMCPHosts()
 	}
-	endpoint, err := url.Parse(server.URL)
+	var egressProxy func() string
+	if s != nil {
+		egressProxy = s.config.EgressProxy
+	}
+	return outboundValidator{
+		kind:             "mcp",
+		configKey:        "allowed_mcp_hosts",
+		allowlist:        ParseOutboundAllowlist(raw),
+		requireAllowlist: true,
+		allowRedirects:   true,
+		maxRedirects:     5,
+		egressProxy:      egressProxy,
+	}
+}
+
+// connectMCP 经管理员白名单与 SSRF 校验后连接 MCP 服务器，连接错误以随后调用的方法名说明；schemas 不为 nil 时记下 tools/list 结果中原样的 inputSchema
+func (s *server) connectMCP(ctx context.Context, server aistudio.MCPServer, method string, schemas *mcpToolSchemas) (*mcp.ClientSession, error) {
+	validator := s.mcpOutboundValidator()
+	endpoint, _, err := validator.validateURL(ctx, server.URL)
 	if err != nil {
 		return nil, fmt.Errorf("mcp server %q url: %w", server.Name, err)
+	}
+	httpClient, err := validator.newHTTPClient(0, func(base http.RoundTripper) http.RoundTripper {
+		return mcpHeaderTransport{base: base, origin: endpoint, headers: server.Headers, schemas: schemas}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mcp server %q: %w", server.Name, err)
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "aistudio2api"}, nil)
 	transport := &mcp.StreamableClientTransport{
 		Endpoint:             server.URL,
-		HTTPClient:           &http.Client{Transport: mcpHeaderTransport{base: base, host: endpoint.Host, headers: server.Headers, schemas: schemas}},
+		HTTPClient:           httpClient,
 		DisableStandaloneSSE: true,
 	}
 	session, err := client.Connect(ctx, transport, nil)
@@ -472,6 +493,8 @@ func (s *server) approvedMCPCall(ctx context.Context, tools []responsesTool, app
 	}
 	output, failed, err := s.callMCPTool(ctx, server, approval.Name, approval.Arguments)
 	switch {
+	case errors.Is(err, errOutboundBlocked):
+		return nil, err
 	case err != nil:
 		item["status"], item["error"] = "failed", map[string]any{"type": "mcp_protocol_error", "code": -32603, "message": publicReason(err)}
 	case failed:

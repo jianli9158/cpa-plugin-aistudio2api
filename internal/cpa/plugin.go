@@ -370,6 +370,18 @@ func (p *Plugin) registrationPayload() rpcRegistration {
 					Default:     "",
 					Description: "英文逗号分隔的模型绑定账户映射（例如 gemini-3.1-pro-preview:a@gmail.com|b@gmail.com）",
 				},
+				{
+					Name:        "allowed_mcp_hosts",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "",
+					Description: "英文逗号分隔的受信任 MCP 服务器主机/源白名单（默认留空禁用宿主侧 MCP 连接，例如 mcp.example.com,*.trusted.example.com；始终禁止内网/回环/链路本地 IP）",
+				},
+				{
+					Name:        "allowed_webhook_hosts",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "",
+					Description: "英文逗号分隔的受信任后台交互 Webhook 主机/源白名单（默认留空禁用 Webhook 出站投递；始终禁止重定向与非公网 IP）",
+				},
 			},
 		},
 		Capabilities: rpcCapabilities{

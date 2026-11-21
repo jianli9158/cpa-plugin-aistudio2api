@@ -1587,6 +1587,9 @@ func responsesMCPServer(tool responsesTool) (aistudio.MCPServer, error) {
 	if tool.ServerLabel == "" || tool.ServerURL == "" {
 		return aistudio.MCPServer{}, fmt.Errorf("mcp server_label and server_url are required")
 	}
+	if _, err := validateHTTPURLSyntax(tool.ServerURL); err != nil {
+		return aistudio.MCPServer{}, fmt.Errorf("mcp server %q url: %w", tool.ServerLabel, err)
+	}
 	server := aistudio.MCPServer{Name: tool.ServerLabel, URL: tool.ServerURL, Headers: maps.Clone(tool.Headers)}
 	if tool.Authorization != "" {
 		if server.Headers == nil {

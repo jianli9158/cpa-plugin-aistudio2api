@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "aistudio2api"
-	PluginVersion = "1.2.11"
+	PluginVersion = "1.2.12"
 	ProviderID    = "aistudio2api"
 )
 
@@ -54,6 +54,8 @@ type PluginConfig struct {
 	RouteUnprefixedModels  *bool         `json:"route_unprefixed_models" yaml:"route_unprefixed_models"`
 	SyncAuthFiles          *bool         `json:"sync_auth_files" yaml:"sync_auth_files"`
 	ModelPrefix            string        `json:"model_prefix" yaml:"model_prefix"`
+	AllowedMCPHosts        string        `json:"allowed_mcp_hosts" yaml:"allowed_mcp_hosts"`
+	AllowedWebhookHosts    string        `json:"allowed_webhook_hosts" yaml:"allowed_webhook_hosts"`
 	Options                *PluginConfig `json:"options,omitempty" yaml:"options,omitempty"`
 }
 
@@ -170,6 +172,12 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 			}
 			if pcfg.PinExecutorAccount == nil {
 				pcfg.PinExecutorAccount = opt.PinExecutorAccount
+			}
+			if pcfg.AllowedMCPHosts == "" {
+				pcfg.AllowedMCPHosts = opt.AllowedMCPHosts
+			}
+			if pcfg.AllowedWebhookHosts == "" {
+				pcfg.AllowedWebhookHosts = opt.AllowedWebhookHosts
 			}
 		}
 	}
@@ -300,6 +308,8 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 	}
 	cfg.AutoStart = boolOrDefault(pcfg.AutoStart, true)
 	cfg.MediaOutput = config.MediaOutputInline
+	cfg.AllowedMCPHosts = strings.TrimSpace(pcfg.AllowedMCPHosts)
+	cfg.AllowedWebhookHosts = strings.TrimSpace(pcfg.AllowedWebhookHosts)
 
 	pcfg.ModelPrefix = strings.TrimSpace(pcfg.ModelPrefix)
 	return pcfg, cfg, nil

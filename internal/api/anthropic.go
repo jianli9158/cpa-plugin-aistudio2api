@@ -845,6 +845,9 @@ func anthropicMCPServers(servers []anthropicMCPServer, tools []anthropicTool) ([
 		if server.Type != "url" || server.Name == "" || server.URL == "" {
 			return nil, fmt.Errorf("mcp_servers entries require type url, name and url")
 		}
+		if _, err := validateHTTPURLSyntax(server.URL); err != nil {
+			return nil, fmt.Errorf("mcp server %q url: %w", server.Name, err)
+		}
 		entry := aistudio.MCPServer{Name: server.Name, URL: server.URL}
 		if server.AuthorizationToken != "" {
 			entry.Headers = map[string]string{"Authorization": "Bearer " + server.AuthorizationToken}

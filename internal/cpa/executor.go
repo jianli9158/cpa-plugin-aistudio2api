@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -597,13 +598,21 @@ func (p *Plugin) handleExecutorHTTPRequest(raw []byte) (any, error) {
 		targetURL = "http://aistudio2api.local" + targetURL
 	}
 	if parsed, err := url.Parse(targetURL); err == nil {
-		if parsed.Path == "/api" || strings.HasPrefix(parsed.Path, "/api/") {
+		cleanPath := path.Clean("/" + parsed.Path)
+		if cleanPath == "/api" || strings.HasPrefix(cleanPath, "/api/") {
 			return pluginapi.ExecutorHTTPResponse{
 				StatusCode: http.StatusForbidden,
 				Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
 				Body:       []byte(`{"error":{"code":"forbidden","message":"management API routes are not accessible via executor"}}`),
 			}, nil
 		}
+		u := url.URL{
+			Scheme:   "http",
+			Host:     "aistudio2api.local",
+			Path:     cleanPath,
+			RawQuery: parsed.RawQuery,
+		}
+		targetURL = u.String()
 	}
 
 	reqCtx, rt, accountID, err := p.prepareExecutionContext(p.ctx, "", req.StorageJSON, req.Metadata, req.Attributes)

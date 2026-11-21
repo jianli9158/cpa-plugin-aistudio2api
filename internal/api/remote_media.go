@@ -3,7 +3,6 @@ package api
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -12,8 +11,6 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"golang.org/x/sync/errgroup"
@@ -22,29 +19,23 @@ import (
 // remoteMediaUserAgent 是下载外部媒体时声明的客户端标识
 const remoteMediaUserAgent = "AIStudio2API (+https://github.com/Mag1cFall/AIStudio2API)"
 
-// remoteMediaClient 是下载外部媒体的 HTTP 客户端，每次重定向前检查目标主机
-var remoteMediaClient = &http.Client{Transport: remoteMediaTransport(), CheckRedirect: func(request *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
-	}
-	return checkRemoteMediaHost(request.Context(), request.URL.Hostname())
-}}
+var remoteMediaValidator = outboundValidator{
+	kind:             "remote_media",
+	requireAllowlist: false,
+	allowRedirects:   true,
+	maxRedirects:     10,
+	envProxy:         true,
+}
 
-// remoteMediaTransport 返回按进程环境变量选择代理的 Transport，直连时在建立连接时拒绝实际连接的非公网地址
-func remoteMediaTransport() *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-	direct := *dialer
-	direct.Control = func(_, address string, _ syscall.RawConn) error {
-		return checkRemoteMediaAddress(netip.MustParseAddrPort(address).Addr())
+// remoteMediaClient 是下载外部媒体的 HTTP 客户端，每次请求、重定向与底层建连均校验公网地址与协议
+var remoteMediaClient = newRemoteMediaClient()
+
+func newRemoteMediaClient() *http.Client {
+	client, err := remoteMediaValidator.newHTTPClient(0, nil)
+	if err != nil {
+		panic(err)
 	}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		if remoteMediaProxy(address) {
-			return dialer.DialContext(ctx, network, address)
-		}
-		return direct.DialContext(ctx, network, address)
-	}
-	return transport
+	return client
 }
 
 // remoteMediaProxy 判断连接地址是否为进程环境变量中 http 或 https 请求的代理
@@ -113,36 +104,24 @@ func remoteMediaURL(value string) bool {
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
-// checkRemoteMediaHost 拒绝解析到本机、私网、链路本地、组播或未指定地址的主机
+// checkRemoteMediaHost 拒绝解析到本机、私网、链路本地、CGNAT、组播、未指定或保留地址的主机
 func checkRemoteMediaHost(ctx context.Context, host string) error {
-	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return err
-	}
-	for _, address := range addresses {
-		if err := checkRemoteMediaAddress(address); err != nil {
-			return fmt.Errorf("host %s resolves to %w", host, err)
-		}
-	}
-	return nil
+	_, err := remoteMediaValidator.resolveAndCheckHost(ctx, host)
+	return err
 }
 
-// checkRemoteMediaAddress 拒绝本机、私网、链路本地、组播与未指定地址
+// checkRemoteMediaAddress 拒绝全部非公网 IP 地址
 func checkRemoteMediaAddress(address netip.Addr) error {
-	address = address.Unmap()
-	if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
-		return fmt.Errorf("non-public address %s", address)
-	}
-	return nil
+	return CheckPublicIP(address)
 }
 
 // downloadRemoteMedia 在请求 context 内下载外部媒体，MIME 依次取响应 Content-Type、声明值与内容判断
-func downloadRemoteMedia(ctx context.Context, url string, declared string) (*aistudio.Blob, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
+func downloadRemoteMedia(ctx context.Context, rawURL string, declared string) (*aistudio.Blob, error) {
+	if _, _, err := remoteMediaValidator.validateURL(ctx, rawURL); err != nil {
 		return nil, err
 	}
-	if err := checkRemoteMediaHost(ctx, request.URL.Hostname()); err != nil {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("User-Agent", remoteMediaUserAgent)
