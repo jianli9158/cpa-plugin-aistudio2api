@@ -159,6 +159,7 @@
     box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
     background: rgba(9, 14, 26, 0.85);
   }
+  select option { background: #0f172a; color: var(--text); }
 
   button {
     display: inline-flex;
@@ -538,6 +539,10 @@
       </div>
     </div>
     <div class="auth-bar">
+      <select id="language" aria-label="Language / 语言">
+        <option value="zh-CN">中文</option>
+        <option value="en">English</option>
+      </select>
       <span id="keyStatusBadge" class="badge warning">未填入管理密钥</span>
       <input type="password" id="mgmtKey" placeholder="输入 CPA 管理密钥" style="width: 240px;" />
       <button data-action="save-key">保存密钥</button>
@@ -700,6 +705,242 @@
 </div>
 
 <script>
+let language = 'zh-CN';
+try {
+  if (sessionStorage.getItem('cpa_aistudio2api_language') === 'en') language = 'en';
+} catch (_) {}
+const translations = {
+  'AIStudio2API 插件控制台 · CLIProxyAPI': 'AIStudio2API Plugin Console · CLIProxyAPI',
+  'AIStudio2API 插件控制台': 'AIStudio2API Plugin Console',
+  'Google AI Studio (Playground + Build) · 进程内 SpiderMonkey BotGuard VM · 原生支持 OpenAI / Responses / Claude / Gemini': 'Google AI Studio (Playground + Build) · In-process SpiderMonkey BotGuard VM · Native OpenAI / Responses / Claude / Gemini support',
+  '推荐 · 自动完成条款与 Drive 授权': 'Recommended · Automatically handles terms and Drive authorization',
+  '启动隔离的本机 Chrome 窗口（独立临时目录，不读取本机已有浏览器数据），完成新号条款确认与 Google Drive 授权后自动拉取凭证并关闭窗口。': 'Opens an isolated local Chrome window without reading existing browser data. After accepting the terms and authorizing Google Drive, credentials are imported and the window closes automatically.',
+  '两种方式均拥有各自独立的单账户代理设置，互不干扰': 'Each method has its own independent per-account proxy setting.',
+  '无痕登录专属单账户代理（可选，留空则使用全局或直连）': 'Login proxy for this account (optional; leave blank for global proxy or direct connection)',
+  '支持粘贴请求头 Cookie（含 SAPISID 与 __Secure-1PSID）、Cookie-Editor JSON 数组或 Playwright storage-state.json。': 'Paste a Cookie request header (including SAPISID and __Secure-1PSID), a Cookie-Editor JSON array, or Playwright storage-state.json.',
+  '例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080': 'e.g. http://127.0.0.1:7890 or socks5://127.0.0.1:1080',
+  '账户邮箱 (留空自动从 Cookie 识别)': 'Account email (leave blank to detect from Cookie)',
+  '此账号代理 (可选，如 http://127.0.0.1:7890)': 'Account proxy (optional, e.g. http://127.0.0.1:7890)',
+  'Google 多账号会话序号 (authuser，默认 0)': 'Google multi-account session index (authuser, default 0)',
+  '在此粘贴 Cookie 请求头、Cookie-Editor JSON 或 storage-state.json 内容...': 'Paste a Cookie header, Cookie-Editor JSON, or storage-state.json here...',
+  '请先在页面右上角输入 CPA 管理密钥并点击「保存密钥」以加载账户池与状态': 'Enter and save the CPA management key above to load accounts and status.',
+  '暂无已导入账户，请使用上方「本机 Chrome 独立窗口登录」或粘贴 Cookie 导入': 'No accounts imported. Use local Chrome login or paste a Cookie above.',
+  '当前管理密钥验证失败 (401/403)，为防止触发 CPA IP 封禁已拦截请求，请修改正确的密钥后点击「保存密钥」': 'The management key was rejected (401/403). Requests are blocked to prevent an IP ban; enter the correct key and save it.',
+  '请先在右上角填入 CPA 管理密钥并点击「保存密钥」': 'Enter the CPA management key above and click Save key first.',
+  '请先在右上角填入 CPA 管理密钥后查看实时运行日志': 'Enter the CPA management key above to view live logs.',
+  '该账户正被独立版 AIStudio2API.app 或其他实例占用，请关闭另一端或避免共用同一账户。': 'This account is in use by AIStudio2API.app or another instance. Close the other instance or use a different account.',
+  '所有账户与模型均处于正常可用状态，无冷却限制': 'All accounts and models are available; none are cooling down.',
+  '展示各账户冷却范围、精确恢复时间、实时倒计时与完整上游原因': 'Shows cooldown scope, recovery time, countdown and upstream reason for each account.',
+  '当前没有处于冷却中的账户或模型': 'No accounts or models are cooling down.',
+  '正在等待 Chrome 窗口完成登录与授权...': 'Waiting for Chrome login and authorization...',
+  '已启动本机 Chrome 独立窗口，请登录 Google 账号并完成 AI Studio 授权，完成后窗口将自动关闭...': 'A local Chrome window has opened. Sign in and authorize AI Studio; the window will close automatically...',
+  '正在启动生成服务并预热 SpiderMonkey WAA Worker...': 'Starting the generation service and warming up SpiderMonkey WAA workers...',
+  '进程锁冲突 (多端共用)': 'Process lock conflict (shared account)',
+  '打开官网页面查看 / 验证 &rarr;': 'Open the official page to review / verify &rarr;',
+  '含 Playground 与 Build 通道原生模型': 'Includes native Playground and Build models',
+  '支持按单账号查看结束时间并单独解除': 'View and clear cooldowns per account',
+  '方式一：本机 Chrome 独立窗口登录': 'Option 1: Sign in using a local Chrome window',
+  '方式二：手动粘贴 Cookie / StorageState 导入': 'Option 2: Import a Cookie / StorageState',
+  '适用于无桌面 / 远程服务器': 'For headless / remote servers',
+  '添加 / 登录 Google AI Studio 账户': 'Add / sign in to a Google AI Studio account',
+  '账户池与 WAA 状态': 'Account pool and WAA status',
+  '启动本机 Chrome 无痕登录': 'Sign in using local Chrome',
+  '导入 Cookie / StorageState 账户': 'Import Cookie / StorageState account',
+  '预览 Cookie 内账号': 'Preview accounts in Cookie',
+  '冷却中账户一览': 'Cooldown overview',
+  '冷却中 / 需重登账户': 'Cooling down / sign-in required',
+  '冷却结束时间 / 状态摘要': 'Cooldown end / status',
+  '单账户代理 (支持随时修改)': 'Account proxy (editable)',
+  '就绪 / 总账户数': 'Ready / total accounts',
+  '已发现 AI Studio 模型': 'Discovered AI Studio models',
+  '同步至 CPA 凭证目录': 'Sync to CPA credentials',
+  '生成服务状态': 'Generation service status',
+  '权益等级 (Tier)': 'Benefit tier',
+  '账户邮箱 (ID)': 'Account email (ID)',
+  '账户邮箱': 'Account email',
+  '冷却范围 / 模型': 'Cooldown scope / model',
+  '冷却结束时间': 'Cooldown end time',
+  '剩余恢复倒计时': 'Time until recovery',
+  '冷却原因详情': 'Cooldown reason',
+  '最近 80 条实时事件': 'Latest 80 live events',
+  'Build 助手: 已启用 (高风控)': 'Build assistant: enabled (high risk)',
+  'Build 助手: 已保护禁用': 'Build assistant: disabled for safety',
+  '密钥无效 (已防封拦截)': 'Invalid key (requests blocked)',
+  '未填入管理密钥': 'Management key not set',
+  '已配置管理密钥': 'Management key configured',
+  '输入 CPA 管理密钥': 'Enter CPA management key',
+  '管理密钥已保存在当前会话，正在加载运行状态...': 'Management key saved for this session; loading status...',
+  '已清除当前会话保存的管理密钥': 'Saved management key cleared for this session',
+  '待填入密钥': 'Key required',
+  '加载中': 'Loading',
+  '保存密钥': 'Save key',
+  '启动生成服务': 'Start generation service',
+  '停止生成服务': 'Stop generation service',
+  '启动服务': 'Start service',
+  '启动中': 'Starting',
+  '停止中': 'Stopping',
+  '启动中...': 'Starting...',
+  '停止中...': 'Stopping...',
+  '检测代理池': 'Probing proxies',
+  '读取模型目录': 'Loading catalog',
+  '预热 Worker': 'Warming workers',
+  '停止在途请求': 'Canceling requests',
+  '停止目录同步': 'Stopping catalog sync',
+  '关闭 Worker': 'Closing workers',
+  '检查出口 IP': 'Check exit IPs',
+  '刷新列表': 'Refresh list',
+  '刷新日志': 'Refresh logs',
+  '运行日志': 'Activity logs',
+  '等待连接...': 'Waiting for connection...',
+  '暂无账户数据': 'No account data',
+  '可用模型': 'Available models',
+  '状态': 'Status',
+  '操作': 'Actions',
+  ' 个账户': ' accounts',
+  ' 项冷却中': ' active cooldowns',
+  ' 项冷却': ' cooldowns',
+  '全部模型 (全局冷却)': 'All models (global cooldown)',
+  '全局冷却 (全部模型)': 'Global cooldown (all models)',
+  '全局冷却': 'Global cooldown',
+  '即将恢复': 'Recovering soon',
+  '剩余 ': 'Remaining ',
+  '小时': 'h ',
+  '分': 'm ',
+  '秒': 's',
+  'http://127.0.0.1:7890 (留空直连)': 'http://127.0.0.1:7890 (blank for direct)',
+  '全局 / 直连': 'Global / direct',
+  '全局/直连': 'global / direct',
+  '设置代理': 'Set proxy',
+  '出口: ': 'Exit: ',
+  '结束: ': 'Ends: ',
+  '正常就绪': 'Ready',
+  '目录同步提示': 'Catalog sync notice',
+  '目录同步失败': 'Catalog sync failed',
+  '恢复就绪': 'Restore ready',
+  '已将账户 ': 'Restored account ',
+  ' 恢复为就绪状态': ' to ready state',
+  '恢复就绪失败: ': 'Failed to restore account: ',
+  '清除此项冷却': 'Clear this cooldown',
+  '清除冷却': 'Clear cooldown',
+  '排空中': 'Draining',
+  '同步中': 'Syncing',
+  '保存中': 'Saving',
+  '刷新中': 'Refreshing',
+  '等待请求': 'Waiting',
+  '读取目录': 'Catalog',
+  '核对验证': 'Verifying',
+  '并发 ': 'Active requests: ',
+  '无痕重登': 'Sign in again',
+  '刷新目录': 'Refresh catalog',
+  '禁用': 'Disable',
+  '启用': 'Enable',
+  '保存': 'Save',
+  '直连': 'Direct',
+  '取消': 'Cancel',
+  '删除': 'Delete',
+  '服务受限': 'Service restricted',
+  '读取状态失败: ': 'Failed to load status: ',
+  '正在更新账户 ': 'Updating proxy for account ',
+  ' 的代理配置...': '...',
+  '账户 ': 'Account ',
+  ' 代理已更新为: ': ' proxy updated to: ',
+  '更新代理失败: ': 'Failed to update proxy: ',
+  '生成服务已启动': 'Generation service started',
+  '生成服务已停止': 'Generation service stopped',
+  '启动失败: ': 'Failed to start: ',
+  '停止失败: ': 'Failed to stop: ',
+  'Chrome 登录成功，已自动导入账户: ': 'Chrome login succeeded; imported account: ',
+  'Chrome 登录未完成: ': 'Chrome login did not complete: ',
+  '已为账户 ': 'Opened a local Chrome window for account ',
+  ' 启动本机 Chrome 独立窗口，请使用该谷歌账号完成登录...': '. Sign in with that Google account...',
+  ' 重新登录并更新成功！': ' signed in again and updated successfully!',
+  '重新登录失败: ': 'Sign-in failed: ',
+  '请先粘贴 Cookie 或 storage-state.json 内容': 'Paste a Cookie or storage-state.json first',
+  '正在验证 Cookie 并导入账户...': 'Validating Cookie and importing account...',
+  '成功导入账户: ': 'Imported account: ',
+  '导入失败: ': 'Import failed: ',
+  '请先粘贴 Cookie 内容': 'Paste a Cookie first',
+  ', 已导入': ', imported',
+  ', 受限: ': ', restricted: ',
+  '识别到账号: ': 'Accounts found: ',
+  '无': 'none',
+  '识别失败: ': 'Discovery failed: ',
+  '正在刷新账户 ': 'Refreshing account ',
+  ' 的模型目录与权益...': ' model catalog and benefits...',
+  '刷新成功，共 ': 'Refresh succeeded: ',
+  ' 个模型': ' models',
+  '刷新失败: ': 'Refresh failed: ',
+  '检测中...': 'Checking...',
+  '当前没有可检测的账户出口配置': 'No account exit configurations to check',
+  '检测失败: ': 'Check failed: ',
+  '共用出口 (': 'Shared exit (',
+  ' 账户)': ' accounts)',
+  '出口 IP 检测失败: ': 'Exit IP check failed: ',
+  '更新失败: ': 'Update failed: ',
+  '确认删除账户 ': 'Delete account ',
+  ' 吗？': '?',
+  '已删除账户 ': 'Deleted account ',
+  '删除失败: ': 'Delete failed: ',
+  '已同步 ': 'Synced ',
+  ' 个账户至 CLIProxyAPI 凭证目录': ' accounts to the CLIProxyAPI credentials directory',
+  '同步失败: ': 'Sync failed: ',
+  '请指定要清除冷却的账户': 'Select an account to clear its cooldown',
+  '已清除账户 ': 'Cleared cooldown for account ',
+  ' 模型 ': ' model ',
+  ' 的冷却状态': '',
+  '清除冷却失败: ': 'Failed to clear cooldown: ',
+  '暂无日志': 'No logs',
+  '等待页面:': 'Page wait:',
+  '页面操作:': 'Page interaction:',
+  '等待WAA刷新:': 'WAA refresh wait:',
+  'WAA计算:': 'WAA computation:',
+  '跳过设置:': 'Settings skipped:',
+  'CPA 管理密钥错误 (HTTP ': 'Invalid CPA management key (HTTP ',
+  ')，已停止重复请求以防止 IP 被封禁，请核对右上角管理密钥': '). Repeated requests have been stopped to prevent an IP ban; check the management key above.'
+};
+function t(value) {
+  if (language !== 'en' || typeof value !== 'string') return value;
+  if (Object.prototype.hasOwnProperty.call(translations, value)) return translations[value];
+  return value;
+}
+function translateDomText(value) {
+  if (language !== 'en' || typeof value !== 'string') return value;
+  const match = value.match(/^(\s*)([\s\S]*?)(\s*)$/);
+  if (!match || !match[2]) return value;
+  const [, leading, core, trailing] = match;
+  if (Object.prototype.hasOwnProperty.call(translations, core)) {
+    return leading + translations[core] + trailing;
+  }
+  let out = core;
+  for (const suffix of [' 个账户', ' 项冷却中', ' 项冷却']) {
+    if (out.includes(suffix)) out = out.split(suffix).join(translations[suffix]);
+  }
+  return leading + out + trailing;
+}
+document.documentElement.lang = language;
+const languageEl = document.getElementById('language');
+if (languageEl) {
+  languageEl.value = language;
+  languageEl.addEventListener('change', e => {
+    try { sessionStorage.setItem('cpa_aistudio2api_language', e.target.value); } catch (_) {}
+    location.reload();
+  });
+}
+if (language === 'en') {
+  document.title = t(document.title);
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const parent = node.parentElement;
+    if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE' || parent.closest('#language')) continue;
+    node.nodeValue = translateDomText(node.nodeValue);
+  }
+  document.querySelectorAll('[placeholder], [title]').forEach(el => {
+    for (const attr of ['placeholder', 'title']) {
+      if (el.hasAttribute(attr)) el.setAttribute(attr, t(el.getAttribute(attr)));
+    }
+  });
+}
 let lastRejectedKey = null;
 let latestAccounts = [];
 let latestCooldowns = [];
@@ -713,15 +954,15 @@ function updateKeyBadge() {
   if (!badge || !input) return;
   const k = input.value.trim();
   if (!k) {
-    badge.textContent = '未填入管理密钥';
+    badge.textContent = t('未填入管理密钥');
     badge.className = 'badge warning';
     input.style.borderColor = '';
   } else if (lastRejectedKey !== null && k === lastRejectedKey) {
-    badge.textContent = '密钥无效 (已防封拦截)';
+    badge.textContent = t('密钥无效 (已防封拦截)');
     badge.className = 'badge danger';
     input.style.borderColor = 'var(--danger)';
   } else {
-    badge.textContent = '已配置管理密钥';
+    badge.textContent = t('已配置管理密钥');
     badge.className = 'badge success';
     input.style.borderColor = '';
   }
@@ -771,11 +1012,11 @@ function saveKeyAndReload() {
   if (k) {
     sessionStorage.setItem('cpa_aistudio2api_key', k);
     if (lastRejectedKey === k) lastRejectedKey = null;
-    showToast('管理密钥已保存在当前会话，正在加载运行状态...', false);
+    showToast(t('管理密钥已保存在当前会话，正在加载运行状态...'), false);
   } else {
     sessionStorage.removeItem('cpa_aistudio2api_key');
     lastRejectedKey = null;
-    showToast('已清除当前会话保存的管理密钥', false);
+    showToast(t('已清除当前会话保存的管理密钥'), false);
   }
   updateKeyBadge();
   loadStatus();
@@ -805,12 +1046,12 @@ async function apiCall(path, method = 'GET', body = null) {
         input.focus();
         input.style.borderColor = 'var(--warning)';
       }
-      throw new Error('请先在右上角填入 CPA 管理密钥并点击「保存密钥」');
+      throw new Error(t('请先在右上角填入 CPA 管理密钥并点击「保存密钥」'));
     }
     if (lastRejectedKey !== null && key === lastRejectedKey) {
       const input = document.getElementById('mgmtKey');
       if (input) input.focus();
-      throw new Error('当前管理密钥验证失败 (401/403)，为防止触发 CPA IP 封禁已拦截请求，请修改正确的密钥后点击「保存密钥」');
+      throw new Error(t('当前管理密钥验证失败 (401/403)，为防止触发 CPA IP 封禁已拦截请求，请修改正确的密钥后点击「保存密钥」'));
     }
     headers['Authorization'] = 'Bearer ' + key;
     headers['X-Management-Key'] = key;
@@ -823,7 +1064,7 @@ async function apiCall(path, method = 'GET', body = null) {
     if (isMgmtRoute && (res.status === 401 || res.status === 403)) {
       lastRejectedKey = key;
       updateKeyBadge();
-      throw new Error('CPA 管理密钥错误 (HTTP ' + res.status + ')，已停止重复请求以防止 IP 被封禁，请核对右上角管理密钥');
+      throw new Error(t('CPA 管理密钥错误 (HTTP ') + res.status + t(')，已停止重复请求以防止 IP 被封禁，请核对右上角管理密钥'));
     }
     throw new Error(data.error || data.message || ('HTTP ' + res.status));
   }
@@ -834,12 +1075,12 @@ async function loadStatus() {
   if (!getKey()) {
     const badge = document.getElementById('stateBadge');
     if (badge) {
-      badge.innerHTML = '<span class="status-dot"></span>待填入密钥';
+      badge.innerHTML = '<span class="status-dot"></span>' + escapeHtml(t('待填入密钥'));
       badge.className = 'badge warning';
     }
     const tbody = document.getElementById('accountsBody');
     if (tbody) {
-      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">请先在页面右上角输入 CPA 管理密钥并点击「保存密钥」以加载账户池与状态</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">' + escapeHtml(t('请先在页面右上角输入 CPA 管理密钥并点击「保存密钥」以加载账户池与状态')) + '</td></tr>';
     }
     return;
   }
@@ -858,12 +1099,12 @@ async function loadStatus() {
 
     const toggleBtn = document.getElementById('serviceToggleBtn');
     const transitionLabels = {
-      probe_proxies: '检测代理池',
-      wait_catalog: '读取模型目录',
-      start_prewarm: '预热 Worker',
-      cancel_requests: '停止在途请求',
-      wait_catalog_stop: '停止目录同步',
-      close_workers: '关闭 Worker'
+      probe_proxies: t('检测代理池'),
+      wait_catalog: t('读取模型目录'),
+      start_prewarm: t('预热 Worker'),
+      cancel_requests: t('停止在途请求'),
+      wait_catalog_stop: t('停止目录同步'),
+      close_workers: t('关闭 Worker')
     };
     const serverOffsetMs = st.time ? (Date.now() - new Date(st.time).getTime()) : 0;
     window.__cpaServerOffsetMs = isNaN(serverOffsetMs) ? 0 : serverOffsetMs;
@@ -873,15 +1114,15 @@ async function loadStatus() {
       const elapsedText = st.transition_since ? formatTransitionElapsed(st.transition_since) : '';
       const stepSuffix = stepText ? (' (' + stepText + (elapsedText ? ' ' + elapsedText : '') + ')') : '';
       if (state === 'LAUNCHING' || state === 'STOPPING') {
-        toggleBtn.textContent = (state === 'LAUNCHING' ? '启动中' : '停止中') + stepSuffix + '...';
+        toggleBtn.textContent = (state === 'LAUNCHING' ? t('启动中') : t('停止中')) + stepSuffix + '...';
         toggleBtn.className = 'secondary sm';
         toggleBtn.disabled = true;
       } else if (isRunning) {
-        toggleBtn.textContent = '停止生成服务';
+        toggleBtn.textContent = t('停止生成服务');
         toggleBtn.className = 'danger sm';
         toggleBtn.disabled = false;
       } else {
-        toggleBtn.textContent = '启动生成服务';
+        toggleBtn.textContent = t('启动生成服务');
         toggleBtn.className = 'success sm';
         toggleBtn.disabled = false;
       }
@@ -890,7 +1131,7 @@ async function loadStatus() {
     const assistantBadge = document.getElementById('assistantBadge');
     if (assistantBadge) {
       const enabled = Boolean(data.enable_assistant_models);
-      assistantBadge.textContent = enabled ? 'Build 助手: 已启用 (高风控)' : 'Build 助手: 已保护禁用';
+      assistantBadge.textContent = enabled ? t('Build 助手: 已启用 (高风控)') : t('Build 助手: 已保护禁用');
       assistantBadge.className = 'badge ' + (enabled ? 'warning' : 'success');
     }
     document.getElementById('statAccounts').textContent = ((counts.ready || 0) + (counts.busy || 0)) + ' / ' + (counts.total || 0);
@@ -900,7 +1141,7 @@ async function loadStatus() {
     latestCooldowns = deduplicateCooldowns(data.cooldowns || []);
     const poolBadge = document.getElementById('accountPoolBadge');
     if (poolBadge) {
-      poolBadge.textContent = latestAccounts.length + ' 个账户';
+      poolBadge.textContent = latestAccounts.length + t(' 个账户');
     }
 
     const cooldownAccountsSet = new Set(latestCooldowns.map(c => String(c.account_id || '').toLowerCase()));
@@ -913,7 +1154,7 @@ async function loadStatus() {
     renderAccounts(latestAccounts, latestCooldowns);
     renderCooldownOverview(latestCooldowns);
   } catch (e) {
-    showToast('读取状态失败: ' + e.message, true);
+    showToast(t('读取状态失败: ') + e.message, true);
   }
 }
 
@@ -929,7 +1170,7 @@ function deduplicateCooldowns(rawList) {
         account_id: item.account_id,
         account_label: item.account_label || item.account_id,
         channel: scope === '*' ? 'all' : (item.channel || 'playground'),
-        model_id: scope === '*' ? '全部模型 (全局冷却)' : (item.model_id || scope),
+        model_id: scope === '*' ? t('全部模型 (全局冷却)') : (item.model_id || scope),
         scope: scope,
         until: item.until,
         reason: item.reason || ''
@@ -953,13 +1194,13 @@ function formatCooldownRemaining(untilStr) {
   const d = new Date(untilStr);
   if (isNaN(d.getTime())) return '';
   const diffSec = Math.max(0, Math.ceil((d.getTime() - Date.now()) / 1000));
-  if (diffSec <= 0) return '即将恢复';
+  if (diffSec <= 0) return t('即将恢复');
   const h = Math.floor(diffSec / 3600);
   const m = Math.floor((diffSec % 3600) / 60);
   const s = diffSec % 60;
-  if (h > 0) return '剩余 ' + h + '小时' + m + '分' + String(s).padStart(2, '0') + '秒';
-  if (m > 0) return '剩余 ' + m + '分' + String(s).padStart(2, '0') + '秒';
-  return '剩余 ' + s + '秒';
+  if (h > 0) return t('剩余 ') + h + t('小时') + m + t('分') + String(s).padStart(2, '0') + t('秒');
+  if (m > 0) return t('剩余 ') + m + t('分') + String(s).padStart(2, '0') + t('秒');
+  return t('剩余 ') + s + t('秒');
 }
 
 function formatTransitionElapsed(sinceStr) {
@@ -977,7 +1218,7 @@ function formatTransitionElapsed(sinceStr) {
 function renderAccounts(accounts, cooldowns) {
   const tbody = document.getElementById('accountsBody');
   if (!accounts.length) {
-    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">暂无已导入账户，请使用上方「本机 Chrome 独立窗口登录」或粘贴 Cookie 导入</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">' + escapeHtml(t('暂无已导入账户，请使用上方「本机 Chrome 独立窗口登录」或粘贴 Cookie 导入')) + '</td></tr>';
     return;
   }
   const cdByAccount = new Map();
@@ -1000,22 +1241,22 @@ function renderAccounts(accounts, cooldowns) {
     if (editingProxyAccountId === acc.id) {
       proxyCell =
         '<div class="proxy-editor">' +
-          '<input type="text" id="proxyInput_' + escapeHtml(acc.id) + '" value="' + escapeHtml(editingProxyDraft) + '" placeholder="http://127.0.0.1:7890 (留空直连)" style="width:195px; padding:5px 9px; font-size:12px;" />' +
-          '<button class="success sm" data-action="save-proxy" data-id="' + escapeHtml(acc.id) + '">保存</button>' +
-          '<button class="secondary sm" data-action="clear-proxy" data-id="' + escapeHtml(acc.id) + '">直连</button>' +
-          '<button class="secondary sm" data-action="cancel-proxy">取消</button>' +
+          '<input type="text" id="proxyInput_' + escapeHtml(acc.id) + '" value="' + escapeHtml(editingProxyDraft) + '" placeholder="' + escapeHtml(t('http://127.0.0.1:7890 (留空直连)')) + '" style="width:195px; padding:5px 9px; font-size:12px;" />' +
+          '<button class="success sm" data-action="save-proxy" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('保存')) + '</button>' +
+          '<button class="secondary sm" data-action="clear-proxy" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('直连')) + '</button>' +
+          '<button class="secondary sm" data-action="cancel-proxy">' + escapeHtml(t('取消')) + '</button>' +
         '</div>';
     } else {
       const proxyLabel = acc.proxy
         ? '<span style="color:#93c5fd; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;">' + escapeHtml(acc.proxy) + '</span>'
-        : '<span style="color:var(--muted);">全局 / 直连</span>';
+        : '<span style="color:var(--muted);">' + escapeHtml(t('全局 / 直连')) + '</span>';
       const egressHint = acc.egress && acc.egress !== acc.proxy
-        ? '<div style="font-size:11px; color:var(--muted);">出口: ' + escapeHtml(acc.egress) + '</div>'
+        ? '<div style="font-size:11px; color:var(--muted);">' + escapeHtml(t('出口: ')) + escapeHtml(acc.egress) + '</div>'
         : '';
       proxyCell =
         '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:160px;">' +
           '<div>' + proxyLabel + egressHint + '</div>' +
-          '<button class="secondary sm" data-action="edit-proxy" data-id="' + escapeHtml(acc.id) + '" data-proxy="' + escapeHtml(acc.proxy || '') + '">设置代理</button>' +
+          '<button class="secondary sm" data-action="edit-proxy" data-id="' + escapeHtml(acc.id) + '" data-proxy="' + escapeHtml(acc.proxy || '') + '">' + escapeHtml(t('设置代理')) + '</button>' +
         '</div>';
     }
 
@@ -1024,14 +1265,14 @@ function renderAccounts(accounts, cooldowns) {
     for (const c of accCooldowns) {
       const endText = formatCooldownEndTime(c.until);
       const remText = formatCooldownRemaining(c.until);
-      const title = c.scope === '*' ? '全局冷却' : c.model_id;
+      const title = c.scope === '*' ? t('全局冷却') : c.model_id;
       detailParts.push(
         '<div class="cooldown-pill-box" title="' + escapeHtml(c.reason || '') + '">' +
           '<div class="cooldown-pill-top">' +
             '<strong style="color:#fbbf24;">' + escapeHtml(title) + '</strong>' +
             '<span class="badge warning" data-until="' + escapeHtml(c.until) + '" style="font-size:10px; padding:1px 7px;">' + escapeHtml(remText) + '</span>' +
           '</div>' +
-          '<div class="cooldown-pill-time">结束: ' + escapeHtml(endText) + '</div>' +
+          '<div class="cooldown-pill-time">' + escapeHtml(t('结束: ')) + escapeHtml(endText) + '</div>' +
           (c.reason ? '<div class="cooldown-pill-reason">' + escapeHtml(c.reason) + '</div>' : '') +
         '</div>'
       );
@@ -1044,19 +1285,19 @@ function renderAccounts(accounts, cooldowns) {
     if (hasLockConflict) {
       detailParts.unshift(
         '<div class="cooldown-pill-box" style="border-color:var(--danger-border); background:var(--danger-bg);">' +
-          '<div class="cooldown-pill-top"><strong style="color:#fca5a5;">进程锁冲突 (多端共用)</strong></div>' +
-          '<div class="cooldown-pill-reason" style="color:#fecaca;">该账户正被独立版 AIStudio2API.app 或其他实例占用，请关闭另一端或避免共用同一账户。</div>' +
+          '<div class="cooldown-pill-top"><strong style="color:#fca5a5;">' + escapeHtml(t('进程锁冲突 (多端共用)')) + '</strong></div>' +
+          '<div class="cooldown-pill-reason" style="color:#fecaca;">' + escapeHtml(t('该账户正被独立版 AIStudio2API.app 或其他实例占用，请关闭另一端或避免共用同一账户。')) + '</div>' +
         '</div>'
       );
     }
     if (acc.state === 'restricted' && rawMsg) {
       const urlMatch = rawMsg.match(/https:\/\/[^\s)]+/);
       const linkHtml = urlMatch
-        ? '<div style="margin-top:4px;"><a href="' + escapeHtml(urlMatch[0]) + '" target="_blank" rel="noopener noreferrer" style="color:#93c5fd; font-size:11px; text-decoration:underline;">打开官网页面查看 / 验证 &rarr;</a></div>'
+        ? '<div style="margin-top:4px;"><a href="' + escapeHtml(urlMatch[0]) + '" target="_blank" rel="noopener noreferrer" style="color:#93c5fd; font-size:11px; text-decoration:underline;">' + t('打开官网页面查看 / 验证 &rarr;') + '</a></div>'
         : '';
       detailParts.unshift(
         '<div class="cooldown-pill-box" style="border-color:var(--danger-border); background:var(--danger-bg);">' +
-          '<div class="cooldown-pill-top"><strong style="color:#fca5a5;">服务受限</strong></div>' +
+          '<div class="cooldown-pill-top"><strong style="color:#fca5a5;">' + escapeHtml(t('服务受限')) + '</strong></div>' +
           '<div class="cooldown-pill-reason" style="color:#fecaca;">' + escapeHtml(rawMsg) + '</div>' +
           linkHtml +
         '</div>'
@@ -1068,25 +1309,25 @@ function renderAccounts(accounts, cooldowns) {
       const isWarningOnly = Array.isArray(acc.models) && acc.models.length > 0;
       detailParts.push(
         '<div class="cooldown-pill-box" style="border-color:' + (isWarningOnly ? 'rgba(245,158,11,0.35)' : 'var(--danger-border)') + '; background:' + (isWarningOnly ? 'rgba(245,158,11,0.1)' : 'var(--danger-bg)') + ';">' +
-          '<div class="cooldown-pill-top"><strong style="color:' + (isWarningOnly ? '#fcd34d' : '#fca5a5') + ';">' + (isWarningOnly ? '目录同步提示' : '目录同步失败') + '</strong></div>' +
+          '<div class="cooldown-pill-top"><strong style="color:' + (isWarningOnly ? '#fcd34d' : '#fca5a5') + ';">' + escapeHtml(isWarningOnly ? t('目录同步提示') : t('目录同步失败')) + '</strong></div>' +
           '<div class="cooldown-pill-reason" style="color:' + (isWarningOnly ? '#fde68a' : '#fecaca') + ';">' + escapeHtml(catalogErr) + '</div>' +
         '</div>'
       );
     }
-    const detailHtml = detailParts.length ? detailParts.join('') : '<span style="color:var(--muted);">正常就绪</span>';
+    const detailHtml = detailParts.length ? detailParts.join('') : '<span style="color:var(--muted);">' + escapeHtml(t('正常就绪')) + '</span>';
 
     const canRestore = !acc.enabled || acc.state === 'restricted' || acc.state === 'auth_required' || hasCooldown;
     const restoreBtn = canRestore
-      ? '<button class="success sm" data-action="restore-account" data-id="' + escapeHtml(acc.id) + '">恢复就绪</button>'
+      ? '<button class="success sm" data-action="restore-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('恢复就绪')) + '</button>'
       : '';
     const clearCooldownBtn = hasCooldown
-      ? '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(acc.id) + '" data-scope="">清除冷却</button>'
+      ? '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(acc.id) + '" data-scope="">' + escapeHtml(t('清除冷却')) + '</button>'
       : '';
 
     const tierText = (acc.benefit_tier || 'FREE').toUpperCase();
     const tierBadgeClass = tierText.includes('PRO') || tierText.includes('PAID') || tierText.includes('ULTRA') ? 'accent' : '';
-    const accTransitionLabels = { draining: '排空中', syncing: '同步中', saving: '保存中', refreshing: '刷新中' };
-    const accStepLabels = { waiting: '等待请求', catalog: '读取目录', verifying: '核对验证' };
+    const accTransitionLabels = { draining: t('排空中'), syncing: t('同步中'), saving: t('保存中'), refreshing: t('刷新中') };
+    const accStepLabels = { waiting: t('等待请求'), catalog: t('读取目录'), verifying: t('核对验证') };
     let transitionHint = '';
     if (acc.transition) {
       const tLabel = accTransitionLabels[acc.transition] || acc.transition;
@@ -1098,7 +1339,7 @@ function renderAccounts(accounts, cooldowns) {
         escapeHtml(tLabel + (sLabel ? '·' + sLabel : '') + stepNum + elapsed) + '</span>';
     }
     const activeHint = acc.active_requests > 0
-      ? ' <span class="badge accent" style="font-size:10px; padding:1px 6px;">并发 ' + Number(acc.active_requests) + '</span>'
+      ? ' <span class="badge accent" style="font-size:10px; padding:1px 6px;">' + escapeHtml(t('并发 ')) + Number(acc.active_requests) + '</span>'
       : '';
 
     return '<tr>' +
@@ -1111,10 +1352,10 @@ function renderAccounts(accounts, cooldowns) {
       '<td><div style="display:flex; gap:6px; flex-wrap:nowrap; align-items:center;">' +
         restoreBtn +
         clearCooldownBtn +
-        '<button class="sm" data-action="relogin-account" data-id="' + escapeHtml(acc.id) + '">无痕重登</button>' +
-        '<button class="secondary sm" data-action="refresh-account" data-id="' + escapeHtml(acc.id) + '">刷新目录</button>' +
-        '<button class="secondary sm" data-action="toggle-account" data-id="' + escapeHtml(acc.id) + '" data-enabled="' + (!acc.enabled) + '">' + (acc.enabled ? '禁用' : '启用') + '</button>' +
-        '<button class="danger sm" data-action="delete-account" data-id="' + escapeHtml(acc.id) + '">删除</button>' +
+        '<button class="sm" data-action="relogin-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('无痕重登')) + '</button>' +
+        '<button class="secondary sm" data-action="refresh-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('刷新目录')) + '</button>' +
+        '<button class="secondary sm" data-action="toggle-account" data-id="' + escapeHtml(acc.id) + '" data-enabled="' + (!acc.enabled) + '">' + escapeHtml(acc.enabled ? t('禁用') : t('启用')) + '</button>' +
+        '<button class="danger sm" data-action="delete-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('删除')) + '</button>' +
       '</div></td>' +
     '</tr>';
   }).join('');
@@ -1129,28 +1370,28 @@ function renderCooldownOverview(cooldowns) {
     return isNaN(t) || t > Date.now() - 1000;
   });
   if (badge) {
-    badge.textContent = active.length ? (active.length + ' 项冷却中') : '0 项冷却';
+    badge.textContent = active.length ? (active.length + t(' 项冷却中')) : ('0' + t(' 项冷却'));
     badge.className = 'badge ' + (active.length ? 'warning' : 'success');
   }
   if (!active.length) {
-    box.innerHTML = '<div style="padding:14px 16px; border-radius:10px; background:rgba(16,185,129,0.07); border:1px solid rgba(52,211,153,0.18); color:#6ee7b7; font-size:13px;">所有账户与模型均处于正常可用状态，无冷却限制</div>';
+    box.innerHTML = '<div style="padding:14px 16px; border-radius:10px; background:rgba(16,185,129,0.07); border:1px solid rgba(52,211,153,0.18); color:#6ee7b7; font-size:13px;">' + escapeHtml(t('所有账户与模型均处于正常可用状态，无冷却限制')) + '</div>';
     return;
   }
   box.innerHTML = '<div class="table-wrap"><table>' +
     '<thead><tr>' +
-      '<th>账户邮箱</th>' +
-      '<th>冷却范围 / 模型</th>' +
-      '<th>冷却结束时间</th>' +
-      '<th>剩余恢复倒计时</th>' +
-      '<th>冷却原因详情</th>' +
-      '<th>操作</th>' +
+      '<th>' + escapeHtml(t('账户邮箱')) + '</th>' +
+      '<th>' + escapeHtml(t('冷却范围 / 模型')) + '</th>' +
+      '<th>' + escapeHtml(t('冷却结束时间')) + '</th>' +
+      '<th>' + escapeHtml(t('剩余恢复倒计时')) + '</th>' +
+      '<th>' + escapeHtml(t('冷却原因详情')) + '</th>' +
+      '<th>' + escapeHtml(t('操作')) + '</th>' +
     '</tr></thead>' +
     '<tbody>' +
     active.map(c => {
       const endText = formatCooldownEndTime(c.until);
       const remText = formatCooldownRemaining(c.until);
       const scopeBadge = c.scope === '*'
-        ? '<span class="badge warning">全局冷却 (全部模型)</span>'
+        ? '<span class="badge warning">' + escapeHtml(t('全局冷却 (全部模型)')) + '</span>'
         : '<span class="badge accent">' + escapeHtml(c.model_id) + '</span> <span style="font-size:11px; color:var(--muted);">[' + escapeHtml(c.channel) + ']</span>';
       return '<tr>' +
         '<td><strong style="color:#fff;">' + escapeHtml(c.account_id) + '</strong></td>' +
@@ -1159,7 +1400,7 @@ function renderCooldownOverview(cooldowns) {
         '<td style="white-space:nowrap;"><span class="badge warning" data-until="' + escapeHtml(c.until) + '">' + escapeHtml(remText) + '</span></td>' +
         '<td style="max-width:420px; word-break:break-word; color:var(--text-secondary); font-size:12px; line-height:1.5;">' + escapeHtml(c.reason || '-') + '</td>' +
         '<td style="white-space:nowrap;">' +
-          '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(c.account_id) + '" data-scope="' + escapeHtml(c.scope) + '">清除此项冷却</button>' +
+          '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(c.account_id) + '" data-scope="' + escapeHtml(c.scope) + '">' + escapeHtml(t('清除此项冷却')) + '</button>' +
         '</td>' +
       '</tr>';
     }).join('') +
@@ -1195,7 +1436,7 @@ async function saveAccountProxy(accountId, overrideProxy) {
     proxy = input ? input.value.trim() : '';
   }
   try {
-    showToast('正在更新账户 ' + accountId + ' 的代理配置...', false);
+    showToast(t('正在更新账户 ') + accountId + t(' 的代理配置...'), false);
     await apiCall('/v0/management/aistudio2api/accounts/update', 'POST', {
       account_id: accountId,
       enabled: enabled,
@@ -1205,11 +1446,11 @@ async function saveAccountProxy(accountId, overrideProxy) {
     });
     editingProxyAccountId = null;
     editingProxyDraft = '';
-    showToast('账户 ' + accountId + ' 代理已更新为: ' + (proxy || '全局/直连'), false);
+    showToast(t('账户 ') + accountId + t(' 代理已更新为: ') + (proxy || t('全局/直连')), false);
     await loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('更新代理失败: ' + e.message, true);
+    showToast(t('更新代理失败: ') + e.message, true);
   }
 }
 
@@ -1226,16 +1467,16 @@ async function startService() {
   const toggleBtn = document.getElementById('serviceToggleBtn');
   if (toggleBtn) {
     toggleBtn.disabled = true;
-    toggleBtn.textContent = '启动中...';
+    toggleBtn.textContent = t('启动中...');
   }
   try {
-    showToast('正在启动生成服务并预热 SpiderMonkey WAA Worker...', false);
+    showToast(t('正在启动生成服务并预热 SpiderMonkey WAA Worker...'), false);
     await apiCall('/v0/management/aistudio2api/service/start', 'POST', {});
-    showToast('生成服务已启动', false);
+    showToast(t('生成服务已启动'), false);
     await loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('启动失败: ' + e.message, true);
+    showToast(t('启动失败: ') + e.message, true);
     await loadStatus();
   }
 }
@@ -1244,14 +1485,14 @@ async function stopService() {
   const toggleBtn = document.getElementById('serviceToggleBtn');
   if (toggleBtn) {
     toggleBtn.disabled = true;
-    toggleBtn.textContent = '停止中...';
+    toggleBtn.textContent = t('停止中...');
   }
   try {
     await apiCall('/v0/management/aistudio2api/service/stop', 'POST', {});
-    showToast('生成服务已停止', false);
+    showToast(t('生成服务已停止'), false);
     await loadStatus();
   } catch (e) {
-    showToast('停止失败: ' + e.message, true);
+    showToast(t('停止失败: ') + e.message, true);
     await loadStatus();
   }
 }
@@ -1262,41 +1503,41 @@ async function loginWithChromeBrowser() {
   const proxy = proxyInput ? proxyInput.value.trim() : '';
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '正在等待 Chrome 窗口完成登录与授权...';
+    btn.textContent = t('正在等待 Chrome 窗口完成登录与授权...');
   }
   try {
-    showToast('已启动本机 Chrome 独立窗口，请登录 Google 账号并完成 AI Studio 授权，完成后窗口将自动关闭...', false);
+    showToast(t('已启动本机 Chrome 独立窗口，请登录 Google 账号并完成 AI Studio 授权，完成后窗口将自动关闭...'), false);
     const res = await apiCall('/v0/management/aistudio2api/accounts/login-browser', 'POST', { proxy });
     const accId = res.account ? res.account.id : '';
-    showToast('Chrome 登录成功，已自动导入账户: ' + accId, false);
+    showToast(t('Chrome 登录成功，已自动导入账户: ') + accId, false);
     await loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('Chrome 登录未完成: ' + e.message, true);
+    showToast(t('Chrome 登录未完成: ') + e.message, true);
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = '启动本机 Chrome 无痕登录';
+      btn.textContent = t('启动本机 Chrome 无痕登录');
     }
   }
 }
 
 async function reloginAccount(id) {
   try {
-    showToast('已为账户 ' + id + ' 启动本机 Chrome 独立窗口，请使用该谷歌账号完成登录...', false);
+    showToast(t('已为账户 ') + id + t(' 启动本机 Chrome 独立窗口，请使用该谷歌账号完成登录...'), false);
     const res = await apiCall('/v0/management/aistudio2api/accounts/relogin', 'POST', { account_id: id });
-    showToast('账户 ' + (res.account ? res.account.id : id) + ' 重新登录并更新成功！', false);
+    showToast(t('账户 ') + (res.account ? res.account.id : id) + t(' 重新登录并更新成功！'), false);
     await loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('重新登录失败: ' + e.message, true);
+    showToast(t('重新登录失败: ') + e.message, true);
   }
 }
 
 async function importCookieAccount() {
   const cookies = document.getElementById('accCookies').value.trim();
   if (!cookies) {
-    showToast('请先粘贴 Cookie 或 storage-state.json 内容', true);
+    showToast(t('请先粘贴 Cookie 或 storage-state.json 内容'), true);
     return;
   }
   const label = document.getElementById('accLabel').value.trim();
@@ -1304,44 +1545,44 @@ async function importCookieAccount() {
   const proxy = proxyEl ? proxyEl.value.trim() : '';
   const authUser = parseInt(document.getElementById('accAuthUser').value || '0', 10);
   try {
-    showToast('正在验证 Cookie 并导入账户...', false);
+    showToast(t('正在验证 Cookie 并导入账户...'), false);
     const res = await apiCall('/v0/management/aistudio2api/accounts', 'POST', {
       label, proxy, auth_user: authUser, cookies
     });
     document.getElementById('accCookies').value = '';
-    showToast('成功导入账户: ' + (res.account ? res.account.id : label), false);
+    showToast(t('成功导入账户: ') + (res.account ? res.account.id : label), false);
     loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('导入失败: ' + e.message, true);
+    showToast(t('导入失败: ') + e.message, true);
   }
 }
 
 async function discoverCookieAccounts() {
   const cookies = document.getElementById('accCookies').value.trim();
   if (!cookies) {
-    showToast('请先粘贴 Cookie 内容', true);
+    showToast(t('请先粘贴 Cookie 内容'), true);
     return;
   }
   const proxyEl = document.getElementById('cookieProxy');
   const proxy = proxyEl ? proxyEl.value.trim() : '';
   try {
     const res = await apiCall('/v0/management/aistudio2api/accounts/discover-cookies', 'POST', { cookies, proxy });
-    const list = (res.accounts || []).map(a => a.email + ' (authuser=' + a.auth_user + (a.imported ? ', 已导入' : '') + (a.restricted ? ', 受限: ' + a.restricted : '') + ')').join(', ');
-    showToast('识别到账号: ' + (list || '无'), false);
+    const list = (res.accounts || []).map(a => a.email + ' (authuser=' + a.auth_user + (a.imported ? t(', 已导入') : '') + (a.restricted ? t(', 受限: ') + a.restricted : '') + ')').join(', ');
+    showToast(t('识别到账号: ') + (list || t('无')), false);
   } catch (e) {
-    showToast('识别失败: ' + e.message, true);
+    showToast(t('识别失败: ') + e.message, true);
   }
 }
 
 async function refreshAccount(id) {
   try {
-    showToast('正在刷新账户 ' + id + ' 的模型目录与权益...', false);
+    showToast(t('正在刷新账户 ') + id + t(' 的模型目录与权益...'), false);
     const res = await apiCall('/v0/management/aistudio2api/accounts/refresh', 'POST', { account_id: id });
-    showToast('刷新成功，共 ' + (res.models_count || 0) + ' 个模型', false);
+    showToast(t('刷新成功，共 ') + (res.models_count || 0) + t(' 个模型'), false);
     loadStatus();
   } catch (e) {
-    showToast('刷新失败: ' + e.message, true);
+    showToast(t('刷新失败: ') + e.message, true);
   }
 }
 async function checkAccountExits() {
@@ -1349,7 +1590,7 @@ async function checkAccountExits() {
   const box = document.getElementById('exitsSummaryBox');
   if (btn) {
     btn.disabled = true;
-    btn.textContent = '检测中...';
+    btn.textContent = t('检测中...');
   }
   try {
     const res = await apiCall('/v0/management/aistudio2api/accounts/exits');
@@ -1357,7 +1598,7 @@ async function checkAccountExits() {
     if (!box) return;
     if (!exits.length) {
       box.style.display = 'block';
-      box.innerHTML = '<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px; color:var(--muted);">当前没有可检测的账户出口配置</div>';
+      box.innerHTML = '<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px; color:var(--muted);">' + escapeHtml(t('当前没有可检测的账户出口配置')) + '</div>';
       return;
     }
     const ipCounts = new Map();
@@ -1369,14 +1610,14 @@ async function checkAccountExits() {
       }
     }
     const rows = exits.map(e => {
-      const proxyLabel = e.proxy ? escapeHtml(e.proxy) : '全局 / 直连';
+      const proxyLabel = e.proxy ? escapeHtml(e.proxy) : escapeHtml(t('全局 / 直连'));
       if (e.error) {
         return '<div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">' +
           '<span style="font-family:ui-monospace,Menlo,monospace; color:var(--text-secondary);">' + proxyLabel + '</span>' +
-          '<span style="color:#fca5a5;">检测失败: ' + escapeHtml(e.error) + '</span></div>';
+          '<span style="color:#fca5a5;">' + escapeHtml(t('检测失败: ')) + escapeHtml(e.error) + '</span></div>';
       }
       const count = ipCounts.get(e.ip) || 0;
-      const sharedBadge = count > 1 ? ' <span class="badge warning" style="font-size:10px; padding:1px 6px;">共用出口 (' + count + ' 账户)</span>' : '';
+      const sharedBadge = count > 1 ? ' <span class="badge warning" style="font-size:10px; padding:1px 6px;">' + escapeHtml(t('共用出口 (')) + count + escapeHtml(t(' 账户)')) + '</span>' : '';
       return '<div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06); flex-wrap:wrap;">' +
         '<span style="font-family:ui-monospace,Menlo,monospace; color:#93c5fd;">' + proxyLabel + '</span>' +
         '<span><strong>' + escapeHtml(e.ip || '-') + '</strong> · ' + escapeHtml(e.country || '-') + ' · ' + escapeHtml(e.timezone || '-') + ' (' + escapeHtml(e.locale || '-') + ')' + sharedBadge + '</span></div>';
@@ -1384,11 +1625,11 @@ async function checkAccountExits() {
     box.style.display = 'block';
     box.innerHTML = '<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px;">' + rows + '</div>';
   } catch (e) {
-    showToast('出口 IP 检测失败: ' + e.message, true);
+    showToast(t('出口 IP 检测失败: ') + e.message, true);
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = '检查出口 IP';
+      btn.textContent = t('检查出口 IP');
     }
   }
 }
@@ -1404,44 +1645,44 @@ async function toggleAccount(id, enabled) {
     });
     loadStatus();
   } catch (e) {
-    showToast('更新失败: ' + e.message, true);
+    showToast(t('更新失败: ') + e.message, true);
   }
 }
 
 async function restoreAccount(id) {
   try {
     await apiCall('/v0/management/aistudio2api/accounts/state', 'POST', { account_id: id, state: 'ready' });
-    showToast('已将账户 ' + id + ' 恢复为就绪状态', false);
+    showToast(t('已将账户 ') + id + t(' 恢复为就绪状态'), false);
     await loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('恢复就绪失败: ' + e.message, true);
+    showToast(t('恢复就绪失败: ') + e.message, true);
   }
 }
 
 async function deleteAccount(id) {
-  if (!confirm('确认删除账户 ' + id + ' 吗？')) return;
+  if (!confirm(t('确认删除账户 ') + id + t(' 吗？'))) return;
   try {
     await apiCall('/v0/management/aistudio2api/accounts/delete', 'POST', { account_id: id });
-    showToast('已删除账户 ' + id, false);
+    showToast(t('已删除账户 ') + id, false);
     loadStatus();
   } catch (e) {
-    showToast('删除失败: ' + e.message, true);
+    showToast(t('删除失败: ') + e.message, true);
   }
 }
 
 async function syncAuthFiles() {
   try {
     const res = await apiCall('/v0/management/aistudio2api/accounts/sync-auth', 'POST', {});
-    showToast('已同步 ' + (res.synced || 0) + ' 个账户至 CLIProxyAPI 凭证目录', false);
+    showToast(t('已同步 ') + (res.synced || 0) + t(' 个账户至 CLIProxyAPI 凭证目录'), false);
   } catch (e) {
-    showToast('同步失败: ' + e.message, true);
+    showToast(t('同步失败: ') + e.message, true);
   }
 }
 
 async function clearCooldowns(accountId, scope = '') {
   if (!accountId) {
-    showToast('请指定要清除冷却的账户', true);
+    showToast(t('请指定要清除冷却的账户'), true);
     return;
   }
   try {
@@ -1449,11 +1690,11 @@ async function clearCooldowns(accountId, scope = '') {
       account_id: accountId,
       scope: scope || ''
     });
-    showToast('已清除账户 ' + accountId + (scope && scope !== '*' ? (' 模型 ' + scope) : '') + ' 的冷却状态', false);
+    showToast(t('已清除账户 ') + accountId + (scope && scope !== '*' ? (t(' 模型 ') + scope) : '') + t(' 的冷却状态'), false);
     await loadStatus();
     loadLogs();
   } catch (e) {
-    showToast('清除冷却失败: ' + e.message, true);
+    showToast(t('清除冷却失败: ') + e.message, true);
   }
 }
 
@@ -1469,7 +1710,7 @@ function formatLogTime(isoStr) {
 async function loadLogs() {
   if (!getKey()) {
     const box = document.getElementById('logsBox');
-    if (box) box.innerHTML = '<div style="color:var(--muted);">请先在右上角填入 CPA 管理密钥后查看实时运行日志</div>';
+    if (box) box.innerHTML = '<div style="color:var(--muted);">' + escapeHtml(t('请先在右上角填入 CPA 管理密钥后查看实时运行日志')) + '</div>';
     return;
   }
   try {
@@ -1477,7 +1718,7 @@ async function loadLogs() {
     const logs = res.logs || [];
     const box = document.getElementById('logsBox');
     if (!logs.length) {
-      box.innerHTML = '<div style="color:var(--muted);">暂无日志</div>';
+      box.innerHTML = '<div style="color:var(--muted);">' + escapeHtml(t('暂无日志')) + '</div>';
       return;
     }
     box.innerHTML = logs.slice(-80).reverse().map(l => {
@@ -1501,11 +1742,11 @@ async function loadLogs() {
         if (r.proof_phases) {
           const pp = r.proof_phases;
           const parts = [];
-          if (pp.lock_ms > 0) parts.push('等待页面:' + pp.lock_ms.toFixed(1) + 'ms');
-          if (pp.interaction_ms > 0) parts.push('页面操作:' + pp.interaction_ms.toFixed(1) + 'ms');
-          if (pp.refresh_ms > 0) parts.push('等待WAA刷新:' + pp.refresh_ms.toFixed(1) + 'ms');
-          if (pp.compute_ms > 0) parts.push('WAA计算:' + pp.compute_ms.toFixed(1) + 'ms');
-          if (pp.settings_skipped > 0) parts.push('跳过设置:' + pp.settings_skipped);
+          if (pp.lock_ms > 0) parts.push(t('等待页面:') + pp.lock_ms.toFixed(1) + 'ms');
+          if (pp.interaction_ms > 0) parts.push(t('页面操作:') + pp.interaction_ms.toFixed(1) + 'ms');
+          if (pp.refresh_ms > 0) parts.push(t('等待WAA刷新:') + pp.refresh_ms.toFixed(1) + 'ms');
+          if (pp.compute_ms > 0) parts.push(t('WAA计算:') + pp.compute_ms.toFixed(1) + 'ms');
+          if (pp.settings_skipped > 0) parts.push(t('跳过设置:') + pp.settings_skipped);
           if (parts.length) fields.push({ key: 'proof_phases', value: parts.join(' / ') });
         }
       }
