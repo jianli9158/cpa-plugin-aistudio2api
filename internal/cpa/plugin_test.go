@@ -3,13 +3,19 @@ package cpa_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
+	"github.com/Mag1cFall/AIStudio2API/internal/api"
+	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/cpa"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginabi"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginapi"
@@ -19,9 +25,12 @@ import (
 func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	var hostCallsMu sync.Mutex
 	var hostCalls []string
 	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		hostCallsMu.Lock()
 		hostCalls = append(hostCalls, method)
+		hostCallsMu.Unlock()
 		return json.Marshal(pluginabi.Envelope{
 			OK:     true,
 			Result: json.RawMessage(`{}`),
@@ -51,6 +60,9 @@ func TestPluginLifecycleAndCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(string(regJSON), `"executor":true`) || !strings.Contains(string(regJSON), `"auth_provider":true`) {
 		t.Fatalf("missing expected capabilities: %s", string(regJSON))
+	}
+	if !strings.Contains(string(regJSON), `"request_lifecycle_plugin":false`) {
+		t.Fatalf("expected request_lifecycle_plugin=false to avoid per-request no-op CGO RPC: %s", string(regJSON))
 	}
 
 	// 2. auth.identifier & auth.parse
@@ -364,13 +376,23 @@ func TestSpiderMonkeyBotGuardVMIntegration(t *testing.T) {
 }
 
 func TestBuiltDynamicLibraryExists(t *testing.T) {
-	dylibPath := filepath.Join("..", "..", "dist", "plugins", "darwin", "arm64", "aistudio2api.dylib")
+	dylibPath := strings.TrimSpace(os.Getenv("CPA_PLUGIN_LIB_PATH"))
+	if dylibPath == "" {
+		ext := ".so"
+		switch runtime.GOOS {
+		case "darwin":
+			ext = ".dylib"
+		case "windows":
+			ext = ".dll"
+		}
+		dylibPath = filepath.Join("..", "..", "dist", "plugins", runtime.GOOS, runtime.GOARCH, "aistudio2api"+ext)
+	}
 	info, err := os.Stat(dylibPath)
 	if err != nil {
-		t.Skipf("dylib not found at %s: %v", dylibPath, err)
+		t.Skipf("shared library not found at %s: %v", dylibPath, err)
 	}
 	if info.Size() < 10*1024*1024 {
-		t.Fatalf("expected static-linked SpiderMonkey dylib > 10MB, got %d bytes", info.Size())
+		t.Fatalf("expected static-linked SpiderMonkey shared library > 10MB, got %d bytes", info.Size())
 	}
 }
 
@@ -857,6 +879,15 @@ func TestSchedulerPickDefersToHostSessionAffinityWhenPartialPoolCooldown(t *test
 	if sResp.Handled {
 		t.Fatalf("expected Handled=false when hostDispatched and >=1 candidate is eligible so host SessionAffinitySelector runs, got: %+v", sResp)
 	}
+
+	// When host RoundRobin/SessionAffinity dispatches to healthy@example.com, executor keeps it pinned;
+	// when dispatched to cooled@example.com on the cooled model, executor unpins so PooledService fails over.
+	if !p.ShouldPinExecutorAccount(t.Context(), rt, "healthy@example.com", "AIStudio/gemini-4-argon") {
+		t.Fatal("expected healthy@example.com to remain pinned for session affinity")
+	}
+	if p.ShouldPinExecutorAccount(t.Context(), rt, "cooled@example.com", "AIStudio/gemini-4-argon") {
+		t.Fatal("expected cooled@example.com to be unpinned on cooled model so pool can fail over")
+	}
 }
 
 func TestAssistantModelsOptInGateAndLiveReload(t *testing.T) {
@@ -1014,5 +1045,463 @@ func TestMaxRegenerationsConfigAndLiveReload(t *testing.T) {
 	}
 	if got := rt.MaxRegenerations(); got != 6 {
 		t.Fatalf("expected live MaxRegenerations=6 after reconfigure, got %d", got)
+	}
+}
+
+func TestWebUISessionStorageLogsLimitAndHostLogBridge(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	var logEventsMu sync.Mutex
+	var hostLogPayloads []string
+	logSignal := make(chan struct{}, 4)
+
+	p := cpa.NewPlugin(func(method string, payload []byte) ([]byte, error) {
+		if method == pluginabi.MethodHostLog {
+			logEventsMu.Lock()
+			hostLogPayloads = append(hostLogPayloads, string(payload))
+			logEventsMu.Unlock()
+			select {
+			case logSignal <- struct{}{}:
+			default:
+			}
+		}
+		return json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(`{}`)})
+	})
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	// 1. Verify WebUI strictly uses sessionStorage (never localStorage.setItem), visibility throttling, and ?limit=80
+	uiReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/aistudio2api/accounts",
+	})
+	uiRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, uiReq)
+	if err != nil {
+		t.Fatalf("webui handle failed: %v", err)
+	}
+	uiHTML := string(uiRes.(pluginapi.ManagementResponse).Body)
+	if strings.Contains(uiHTML, "localStorage.setItem") {
+		t.Fatal("webui.html must not persist management keys in localStorage")
+	}
+	for _, needle := range []string{"sessionStorage.setItem", "document.hidden", "visibilitychange", "/v0/management/aistudio2api/logs?limit=80"} {
+		if !strings.Contains(uiHTML, needle) {
+			t.Fatalf("expected %q in webui.html", needle)
+		}
+	}
+
+	// 2. Record both an INFO access log and an ERROR access log via rt.Admin.RecordAccessLog,
+	// verifying structured host.log bridging (with model/status/error fields) and ?limit=1 pagination.
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+	rt.Admin.RecordAccessLog(api.AccessLog{
+		RequestID: "req-ok-1",
+		Model:     "gemini-3.8-flash",
+		Method:    http.MethodPost,
+		Path:      "/v1/chat/completions",
+		Status:    http.StatusOK,
+	})
+	rt.Admin.RecordAccessLog(api.AccessLog{
+		RequestID: "req-err-2",
+		Model:     "gemini-4-argon",
+		Method:    http.MethodPost,
+		Path:      "/v1/chat/completions",
+		Status:    http.StatusBadGateway,
+		Error:     "upstream stream interrupted",
+	})
+	select {
+	case <-logSignal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected runtime WARN/ERROR log to bridge to host.log callback")
+	}
+	logEventsMu.Lock()
+	gotHostLogs := append([]string(nil), hostLogPayloads...)
+	logEventsMu.Unlock()
+	if len(gotHostLogs) == 0 || (!strings.Contains(gotHostLogs[0], `"level":"warn"`) && !strings.Contains(gotHostLogs[0], `"level":"error"`)) {
+		t.Fatalf("unexpected host.log payload: %v", gotHostLogs)
+	}
+
+	allLogs := rt.RecentLogs()
+	if len(allLogs) < 2 {
+		t.Fatalf("expected >= 2 runtime logs, got %d", len(allLogs))
+	}
+	logsReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/management/aistudio2api/logs?limit=1",
+	})
+	logsRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, logsReq)
+	if err != nil {
+		t.Fatalf("GET /logs?limit=1 failed: %v", err)
+	}
+	var logsBody struct {
+		Logs []any `json:"logs"`
+	}
+	if err := json.Unmarshal(logsRes.(pluginapi.ManagementResponse).Body, &logsBody); err != nil {
+		t.Fatalf("decode /logs?limit=1 response: %v", err)
+	}
+	if len(logsBody.Logs) != 1 {
+		t.Fatalf("expected exactly 1 log entry from ?limit=1, got %d", len(logsBody.Logs))
+	}
+}
+
+func TestAuthRequiredParseSkipsStaleCookiesAndRecoversOnNewCookies(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: true\nsync_auth_files: false\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+
+	makeAuthParseReq := func(sapisid string) []byte {
+		payload := map[string]any{
+			"type":       "aistudio2api",
+			"provider":   "aistudio2api",
+			"account_id": "user@example.com",
+			"email":      "user@example.com",
+			"proxy":      "http://127.0.0.1:1",
+			"locale":     "en-US",
+			"timezone":   "UTC",
+			"storage_state": map[string]any{
+				"cookies": []map[string]any{
+					{"name": "SAPISID", "value": sapisid, "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-1PAPISID", "value": sapisid, "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-3PAPISID", "value": sapisid, "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-1PSID", "value": "psid-1", "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "__Secure-3PSID", "value": "psid-3", "domain": ".google.com", "path": "/", "expires": -1},
+					{"name": "SID", "value": "sid-1", "domain": ".google.com", "path": "/", "expires": -1},
+				},
+			},
+		}
+		rawJSON, _ := json.Marshal(payload)
+		req, _ := json.Marshal(pluginapi.AuthParseRequest{
+			FileName: "aistudio2api-user@example.com.json",
+			RawJSON:  rawJSON,
+		})
+		return req
+	}
+
+	res, err := p.HandleMethod(pluginabi.MethodAuthParse, makeAuthParseReq("old-sapisid"))
+	if err != nil {
+		t.Fatalf("initial auth.parse failed: %v", err)
+	}
+	parsed := res.(pluginapi.AuthParseResponse)
+	if !parsed.Handled || parsed.Auth.Disabled {
+		t.Fatalf("expected handled enabled auth on initial parse, got %+v", parsed)
+	}
+
+	poolAcc, ok := rt.Pool().AccountByID("user@example.com")
+	if !ok || poolAcc == nil {
+		t.Fatal("expected account in pool")
+	}
+	poolAcc.State = aistudio.AccountAuthRequired
+
+	// Re-parsing the same dead cookies must preserve AccountAuthRequired and keep host auth disabled.
+	res, err = p.HandleMethod(pluginabi.MethodAuthParse, makeAuthParseReq("old-sapisid"))
+	if err != nil {
+		t.Fatalf("stale auth.parse failed: %v", err)
+	}
+	if poolAcc.State != aistudio.AccountAuthRequired {
+		t.Fatalf("expected AccountAuthRequired preserved for identical cookies, got %s", poolAcc.State)
+	}
+	if staleParsed := res.(pluginapi.AuthParseResponse); !staleParsed.Auth.Disabled {
+		t.Fatalf("expected host auth disabled while AccountAuthRequired, got %+v", staleParsed.Auth)
+	}
+
+	// Host auth.refresh while AccountAuthRequired must also preserve state and stay disabled.
+	refreshReq, _ := json.Marshal(pluginapi.AuthRefreshRequest{
+		AuthID:     "aistudio2api-user@example.com.json",
+		Attributes: map[string]string{"account_id": "user@example.com"},
+	})
+	refreshRes, err := p.HandleMethod(pluginabi.MethodAuthRefresh, refreshReq)
+	if err != nil {
+		t.Fatalf("auth.refresh failed: %v", err)
+	}
+	if refreshed := refreshRes.(pluginapi.AuthRefreshResponse); !refreshed.Auth.Disabled || poolAcc.State != aistudio.AccountAuthRequired {
+		t.Fatalf("expected disabled auth and AccountAuthRequired during auth.refresh, got %+v state=%s", refreshed.Auth, poolAcc.State)
+	}
+
+	// Updating cookies via auth.parse must re-import and clear AccountAuthRequired.
+	res, err = p.HandleMethod(pluginabi.MethodAuthParse, makeAuthParseReq("fresh-sapisid"))
+	if err != nil {
+		t.Fatalf("fresh auth.parse failed: %v", err)
+	}
+	if poolAcc.State == aistudio.AccountAuthRequired {
+		t.Fatalf("expected fresh cookies to clear AccountAuthRequired, got %s", poolAcc.State)
+	}
+}
+
+func TestManagementAccountStateRestoreAndAuthSync(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	authDir := filepath.Join(tmpDir, ".cli-proxy-api")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("mkdir authDir: %v", err)
+	}
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: true\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq); err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+	rt, err := p.Runtime()
+	if err != nil {
+		t.Fatalf("Runtime() failed: %v", err)
+	}
+
+	payload := map[string]any{
+		"type":       "aistudio2api",
+		"provider":   "aistudio2api",
+		"account_id": "restore@example.com",
+		"email":      "restore@example.com",
+		"proxy":      "http://127.0.0.1:1",
+		"locale":     "en-US",
+		"timezone":   "UTC",
+		"storage_state": map[string]any{
+			"cookies": []map[string]any{
+				{"name": "SAPISID", "value": "sap-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-1PAPISID", "value": "sap-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-3PAPISID", "value": "sap-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-1PSID", "value": "psid-1", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "__Secure-3PSID", "value": "psid-3", "domain": ".google.com", "path": "/", "expires": -1},
+				{"name": "SID", "value": "sid-1", "domain": ".google.com", "path": "/", "expires": -1},
+			},
+		},
+	}
+	rawJSON, _ := json.Marshal(payload)
+	parseReq, _ := json.Marshal(pluginapi.AuthParseRequest{
+		FileName: "aistudio2api-restore@example.com.json",
+		RawJSON:  rawJSON,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodAuthParse, parseReq); err != nil {
+		t.Fatalf("auth.parse failed: %v", err)
+	}
+
+	if err := rt.Pool().MarkRestricted("restore@example.com", &camoufoxnative.AccessDenial{Err: camoufoxnative.ErrServiceRestricted}); err != nil {
+		t.Fatalf("MarkRestricted failed: %v", err)
+	}
+	if p.ShouldPinExecutorAccount(t.Context(), rt, "restore@example.com", "gemini-3.8-flash") {
+		t.Fatal("expected restricted account not to be pinned")
+	}
+	authFilePath := filepath.Join(authDir, "aistudio2api-restore@example.com.json")
+	checkHostDisabled := func(want bool) {
+		t.Helper()
+		raw, err := os.ReadFile(authFilePath)
+		if err != nil {
+			t.Fatalf("read host auth file: %v", err)
+		}
+		var doc struct {
+			Disabled bool `json:"disabled"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("decode host auth file: %v", err)
+		}
+		if doc.Disabled != want {
+			t.Fatalf("host auth disabled = %v, want %v (json=%s)", doc.Disabled, want, string(raw))
+		}
+	}
+	checkHostDisabled(true)
+
+	callState := func(state string) (pluginapi.ManagementResponse, api.AdminAccount) {
+		body, _ := json.Marshal(map[string]string{
+			"account_id": "restore@example.com",
+			"state":      state,
+		})
+		req, _ := json.Marshal(pluginapi.ManagementRequest{
+			Method: http.MethodPost,
+			Path:   "/v0/management/aistudio2api/accounts/state",
+			Body:   body,
+		})
+		res, err := p.HandleMethod(pluginabi.MethodManagementHandle, req)
+		if err != nil {
+			t.Fatalf("accounts/state call failed: %v", err)
+		}
+		mres := res.(pluginapi.ManagementResponse)
+		var out struct {
+			Account api.AdminAccount `json:"account"`
+		}
+		_ = json.Unmarshal(mres.Body, &out)
+		return mres, out.Account
+	}
+
+	poolAcc, ok := rt.Pool().AccountByID("restore@example.com")
+	if !ok || poolAcc == nil {
+		t.Fatal("expected restore@example.com in pool")
+	}
+	isReadyOrSyncing := func(state string) bool {
+		return state == string(aistudio.AccountReady) || state == "busy"
+	}
+
+	// Restore restricted -> ready: clears restriction, syncs host auth disabled=false, restores pinning.
+	res, acc := callState("ready")
+	if res.StatusCode != http.StatusOK || !acc.Enabled || !isReadyOrSyncing(acc.State) || poolAcc.State != aistudio.AccountReady {
+		t.Fatalf("expected restored ready account, status=%d acc=%+v poolState=%s body=%s", res.StatusCode, acc, poolAcc.State, string(res.Body))
+	}
+	checkHostDisabled(false)
+	if !p.ShouldPinExecutorAccount(t.Context(), rt, "restore@example.com", "gemini-3.8-flash") {
+		t.Fatal("expected restored account to be pinned again")
+	}
+
+	// Disable via accounts/state -> disabled.
+	res, acc = callState("disabled")
+	if res.StatusCode != http.StatusOK || acc.Enabled || acc.State != "disabled" {
+		t.Fatalf("expected disabled account, status=%d acc=%+v body=%s", res.StatusCode, acc, string(res.Body))
+	}
+	checkHostDisabled(true)
+
+	// Re-enable & restore via accounts/state -> ready.
+	res, acc = callState("ready")
+	if res.StatusCode != http.StatusOK || !acc.Enabled || !isReadyOrSyncing(acc.State) || poolAcc.State != aistudio.AccountReady {
+		t.Fatalf("expected re-enabled ready account, status=%d acc=%+v poolState=%s body=%s", res.StatusCode, acc, poolAcc.State, string(res.Body))
+	}
+	checkHostDisabled(false)
+	// Invalid state must return 400.
+	res, _ = callState("bogus")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid state, got %d body=%s", res.StatusCode, string(res.Body))
+	}
+
+	// Verify WebUI renders the restore-account action and status/account transition hints.
+	uiReq, _ := json.Marshal(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/aistudio2api/accounts",
+	})
+	uiRes, err := p.HandleMethod(pluginabi.MethodManagementHandle, uiReq)
+	if err != nil {
+		t.Fatalf("webui handle failed: %v", err)
+	}
+	uiHTML := string(uiRes.(pluginapi.ManagementResponse).Body)
+	for _, needle := range []string{"restore-account", "/v0/management/aistudio2api/accounts/state", "transitionLabels", "catalog_error"} {
+		if !strings.Contains(uiHTML, needle) {
+			t.Fatalf("expected %q in webui.html", needle)
+		}
+	}
+}
+
+func TestExecutorResponsesMCPSSRFBlockedEndToEnd(t *testing.T) {
+	var hits atomic.Int32
+	victim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"secret":"host-management-api"}`))
+	}))
+	defer victim.Close()
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+
+	p := cpa.NewPlugin(nil)
+	defer func() {
+		_, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil)
+	}()
+
+	regReq, _ := json.Marshal(map[string]any{
+		"config_yaml":    []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\n"),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	regRes, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq)
+	if err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+
+	// Verify allowed_mcp_hosts and allowed_webhook_hosts are exposed in ConfigFields and default to empty (deny-all).
+	rawReg, _ := json.Marshal(regRes)
+	var parsedReg struct {
+		Metadata pluginapi.Metadata `json:"metadata"`
+	}
+	if err := json.Unmarshal(rawReg, &parsedReg); err != nil {
+		t.Fatalf("decode registration: %v", err)
+	}
+	foundFields := map[string]any{}
+	for _, f := range parsedReg.Metadata.ConfigFields {
+		foundFields[f.Name] = f.Default
+	}
+	for _, key := range []string{"allowed_mcp_hosts", "allowed_webhook_hosts"} {
+		def, ok := foundFields[key]
+		if !ok {
+			t.Fatalf("expected ConfigField %q in registration metadata", key)
+		}
+		if def != "" {
+			t.Fatalf("expected ConfigField %q default to be empty string, got %#v", key, def)
+		}
+	}
+
+	// End-to-end executor.execute -> /v1/responses -> MCP SSRF probe must be blocked with 0 hits.
+	payload := []byte(`{"model":"gemini-3.8-flash","input":"probe","tools":[{"type":"mcp","server_label":"cpa","server_url":"` + victim.URL + `","headers":{"Authorization":"Bearer mgmt-key"}}]}`)
+	execReq, _ := json.Marshal(pluginapi.ExecutorRequest{
+		Model:   "gemini-3.8-flash",
+		Format:  "responses",
+		Payload: payload,
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodExecutorExecute, execReq); err == nil {
+		t.Fatal("expected executor.execute Responses MCP SSRF probe to fail, got nil error")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("expected 0 outbound hits to loopback victim via executor.execute, got %d", hits.Load())
+	}
+
+	// Verify executor.http_request blocks /api path traversal (/v1/../api/status) with 403.
+	httpReq, _ := json.Marshal(pluginapi.ExecutorHTTPRequest{
+		Method: http.MethodGet,
+		URL:    "/v1/../api/status",
+	})
+	httpRes, err := p.HandleMethod(pluginabi.MethodExecutorHTTPRequest, httpReq)
+	if err != nil {
+		t.Fatalf("executor.http_request failed: %v", err)
+	}
+	if got := httpRes.(pluginapi.ExecutorHTTPResponse).StatusCode; got != http.StatusForbidden {
+		t.Fatalf("expected 403 for /v1/../api/status path traversal, got %d", got)
+	}
+
+	// Verify live reload updates allowed_mcp_hosts without still allowing loopback.
+	reloadReq, _ := json.Marshal(map[string]any{
+		"config_yaml": []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\nallowed_mcp_hosts: \"mcp.trusted.example\"\n"),
+	})
+	if _, err := p.HandleMethod(pluginabi.MethodPluginReconfigure, reloadReq); err != nil {
+		t.Fatalf("plugin.reconfigure failed: %v", err)
+	}
+	if got := p.Config().AllowedMCPHosts; got != "mcp.trusted.example" {
+		t.Fatalf("expected AllowedMCPHosts=mcp.trusted.example after reload, got %q", got)
+	}
+	if _, err := p.HandleMethod(pluginabi.MethodExecutorExecute, execReq); err == nil {
+		t.Fatal("expected loopback MCP SSRF probe to remain blocked after reload")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("expected 0 outbound hits after reload, got %d", hits.Load())
 	}
 }

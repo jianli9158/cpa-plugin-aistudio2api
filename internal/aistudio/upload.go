@@ -228,31 +228,37 @@ func (copies *TemporaryFileCopies) Cleanup() error {
 	return copies.cleanup(context.Background())
 }
 
-// cleanup 以 parent 为父 context 删除全部临时 Drive 副本，删除成功或文件已不存在的副本解除绑定，删除失败的保留绑定
+// cleanup 以 parent 为父 context 同时删除全部临时 Drive 副本，删除成功或文件已不存在的副本解除绑定，删除失败的保留绑定
 func (copies *TemporaryFileCopies) cleanup(parent context.Context) error {
 	copies.once.Do(func() {
 		if copies.release != nil {
 			copies.release()
 		}
-		for index := len(copies.copies) - 1; index >= 0; index-- {
-			cleanupCtx, cancel := context.WithTimeout(parent, driveCleanupTimeout)
-			cleanupCtx = ContextWithAccountLease(cleanupCtx, copies.lease)
-			copy := copies.copies[index]
-			deleteErr := copies.client.deleteDriveFile(
-				cleanupCtx, copies.lease.Account().ID, copy.token, copy.id,
-			)
-			if driveFileNotFound(deleteErr, "DriveDelete") {
-				deleteErr = nil
-			}
-			bindErr := error(nil)
-			if deleteErr == nil && copy.bound {
-				if bindErr = copies.lease.pool.unbindResourceContext(cleanupCtx, copy.id); errors.Is(bindErr, ErrResourceNotFound) {
-					bindErr = nil
+		errs := make([]error, len(copies.copies))
+		var group sync.WaitGroup
+		for index, copy := range copies.copies {
+			group.Go(func() {
+				cleanupCtx, cancel := context.WithTimeout(parent, driveCleanupTimeout)
+				defer cancel()
+				cleanupCtx = ContextWithAccountLease(cleanupCtx, copies.lease)
+				deleteErr := copies.client.deleteDriveFile(
+					cleanupCtx, copies.lease.Account().ID, copy.token, copy.id,
+				)
+				if driveFileNotFound(deleteErr, "DriveDelete") {
+					deleteErr = nil
 				}
-			}
-			cancel()
-			copies.err = errors.Join(copies.err, deleteErr, bindErr)
+				bindErr := error(nil)
+				if deleteErr == nil && copy.bound {
+					if bindErr = copies.lease.pool.unbindResourceContext(cleanupCtx, copy.id); errors.Is(bindErr, ErrResourceNotFound) {
+						bindErr = nil
+					}
+				}
+				errs[index] = errors.Join(deleteErr, bindErr)
+			})
 		}
+		group.Wait()
+		slices.Reverse(errs)
+		copies.err = errors.Join(errs...)
 	})
 	return copies.err
 }
@@ -489,7 +495,7 @@ func (s *PooledService) UploadFile(ctx context.Context, request UploadRequest) (
 
 // fileUploadAccountIDs 返回请求所用 API key 可用的上传候选账户，空闲账户在前
 func (p *AccountPool) fileUploadAccountIDs(ctx context.Context) []string {
-	selection := p.scopedSelection(ctx, AccountSelection{})
+	selection := p.ScopedSelection(ctx, AccountSelection{})
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	available := make([]string, 0, len(p.accounts))
@@ -1048,7 +1054,10 @@ func (s *PooledService) inlineMediaBusy(id string) bool {
 	return s.inlineMediaUses[id] > 0
 }
 
-// UploadInlineMediaToLease 把内联附件改写为目标账户 Drive 文件的引用，keepImages 为真时 CreateInteractionStream 可内联的图片保持内联，同一账户已上传过的相同内容直接引用，Drive 存储空间已满时没有上传成功的附件保持内联（keepImages 为真时只接受内联图片，仍返回上传错误），闲置超过 inlineMediaIdle 的旧文件在本次请求结束时删除
+// UploadInlineMediaToLease 把内联附件改写为目标账户 Drive 文件的引用
+// keepImages 为真时 CreateInteractionStream 可内联的图片保持内联
+// 同一账户已上传过的相同内容直接引用；闲置超过 inlineMediaIdle 的旧文件在本次请求结束时删除
+// Drive 存储空间已满时没有上传成功的附件保持内联，keepImages 为真时只接受内联图片，仍返回上传错误
 func (s *PooledService) UploadInlineMediaToLease(
 	ctx context.Context,
 	target *AccountLease,
@@ -1127,11 +1136,11 @@ func (s *PooledService) UploadInlineMediaToLease(
 	})
 	var uploader pageUploader
 	if worker := pageWorker(targetID); worker != nil {
-		page, _, pageErr := worker.usePage(targetCtx)
+		tab, pageErr := worker.usePage(targetCtx)
 		if pageErr != nil {
 			return nil, nil, errors.Join(pageErr, temporary.Cleanup())
 		}
-		uploader, _ = page.(pageUploader)
+		uploader, _ = worker.tabPage(tab).(pageUploader)
 	}
 	rerun := false
 	if uploader != nil && len(staged) > 0 {

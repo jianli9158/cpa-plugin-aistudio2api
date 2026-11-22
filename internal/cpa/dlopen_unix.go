@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || linux
 
 package cpa
 
@@ -58,6 +58,11 @@ static int c_test_dlopen_plugin(const char* path, const char* method, const char
 	if (handle == NULL) {
 		*err_msg = strdup(dlerror());
 		return -1;
+	}
+	if (dlsym(handle, "cliproxy_plugin_init") == NULL) {
+		*err_msg = strdup("dlsym cliproxy_plugin_init failed");
+		dlclose(handle);
+		return -2;
 	}
 	cliproxy_plugin_init_fn init_fn = (cliproxy_plugin_init_fn)dlsym(handle, "cliproxyPluginInit");
 	if (init_fn == NULL) {

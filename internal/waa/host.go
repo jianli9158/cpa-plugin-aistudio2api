@@ -46,7 +46,10 @@ var firefoxShapeJSON = sync.OnceValues(func() (string, error) {
 	return string(data), err
 })
 
-// shapeTable 是进程内准备一次、各 VM 共用的只读形状表：parts 为把 defaults 换成空对象、各接口的 pr 换成成员名与种类 pk 后在 Closure 监听表全局名处切开的各段，各 VM 以自己的随机名拼回；defaults 与 members 为各接口默认值与原型成员的 JSON，names 为 defaults 的接口名按原顺序的 JSON 数组，各 VM 只在首次读取某接口的这两项时解析它
+// shapeTable 是进程内准备一次、各 VM 共用的只读形状表
+// parts 为把 defaults 换成空对象、各接口的 pr 换成成员名与种类 pk 后在 Closure 监听表全局名处切开的各段，各 VM 以自己的随机名拼回
+// defaults 与 members 为各接口默认值与原型成员的 JSON，names 为 defaults 的接口名按原顺序的 JSON 数组
+// 各 VM 只在首次读取某接口的 defaults 与 members 时解析它
 type shapeTable struct {
 	parts    []string
 	names    string
@@ -622,12 +625,13 @@ func (state *agent) natives(realm *realmHost) map[string]hostNative {
 		natives["loadImage"] = hostNative{2, func(call *mozjs.Call) error {
 			address, id := call.ArgString(0), call.ArgNumber(1)
 			state.pending++
+			issued, started := state.loop.now(), time.Now()
 			go func() {
 				loaded := state.loadImage(address)
-				state.loop.post(func() {
+				state.loop.push(&task{at: issued + milliseconds(time.Since(started)), job: func() {
 					state.dispatch(realm, id, mozjs.Bool(loaded))
 					state.loaded()
-				})
+				}})
 			}()
 			return nil
 		}}
@@ -636,12 +640,13 @@ func (state *agent) natives(realm *realmHost) map[string]hostNative {
 		natives["loadFrame"] = hostNative{2, func(call *mozjs.Call) error {
 			address, id := call.ArgString(0), call.ArgNumber(1)
 			state.pending++
+			issued, started := state.loop.now(), time.Now()
 			go func() {
 				loaded := state.loadFrame(address)
-				state.loop.post(func() {
+				state.loop.push(&task{at: issued + milliseconds(time.Since(started)), job: func() {
 					state.dispatch(realm, id, mozjs.Bool(loaded))
 					state.loaded()
-				})
+				}})
 			}()
 			return nil
 		}}

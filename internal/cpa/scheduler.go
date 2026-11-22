@@ -75,7 +75,7 @@ func (p *Plugin) handleSchedulerPick(raw []byte) (any, error) {
 	candidateByAccount := make(map[string]string, len(aistudioCandidates))
 	var poolFallbackCandidateID string
 	for _, cand := range aistudioCandidates {
-		if strings.EqualFold(cand.Status, "disabled") || strings.EqualFold(cand.Status, "unavailable") || strings.EqualFold(cand.Status, "restricted") {
+		if isCandidateStatusIneligible(cand) {
 			continue
 		}
 		accID := extractAccountIDFromAuth(nil, cand.Metadata, cand.Attributes)
@@ -240,6 +240,28 @@ func isAIStudioCandidate(cand pluginapi.SchedulerAuthCandidate) bool {
 	}
 	idLower := strings.ToLower(strings.TrimSpace(cand.ID))
 	return strings.HasPrefix(idLower, "aistudio2api") || strings.HasPrefix(idLower, "aistudio-")
+}
+
+func isCandidateStatusIneligible(cand pluginapi.SchedulerAuthCandidate) bool {
+	switch strings.ToLower(strings.TrimSpace(cand.Status)) {
+	case "disabled", "unavailable", "restricted", "auth_required":
+		return true
+	}
+	if cand.Attributes != nil {
+		switch strings.ToLower(strings.TrimSpace(cand.Attributes["state"])) {
+		case "restricted", "auth_required", "unavailable":
+			return true
+		}
+	}
+	if cand.Metadata != nil {
+		if st, ok := cand.Metadata["state"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(st)) {
+			case "restricted", "auth_required", "unavailable":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Plugin) handleRequestComplete(raw []byte) (any, error) {

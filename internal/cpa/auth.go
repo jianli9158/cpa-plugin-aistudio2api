@@ -137,6 +137,8 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 
 	prevDisabled := payload.Disabled
 	prevServiceStopped := payload.ServiceStopped
+	prevDegraded := strings.EqualFold(strings.TrimSpace(payload.State), string(aistudio.AccountRestricted)) ||
+		strings.EqualFold(strings.TrimSpace(payload.State), string(aistudio.AccountAuthRequired))
 	state, hasState := extractStorageStateFromPayload(rawJSON, payload)
 	rt, rtErr := p.Runtime()
 	var imported api.AdminAccount
@@ -165,9 +167,11 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 	disabled := false
 	if serviceStopped {
 		disabled = true
-	} else if prevServiceStopped || inStartupWindow {
+	} else if prevServiceStopped || prevDegraded || inStartupWindow {
 		if rtErr == nil && imported.ID != "" {
-			disabled = !imported.Enabled
+			disabled = !imported.Enabled ||
+				imported.State == string(aistudio.AccountRestricted) ||
+				imported.State == string(aistudio.AccountAuthRequired)
 		}
 	} else if prevDisabled != nil {
 		disabled = *prevDisabled
@@ -192,7 +196,7 @@ func (p *Plugin) parseAndSyncAuthPayload(ctx context.Context, fileName string, r
 					imported = updated
 				}
 				if wantEnabled {
-					go func() { _ = rt.EnsureRunning(p.ctx) }()
+					p.startRuntimeAsync(rt)
 				}
 			}
 		}
@@ -294,7 +298,8 @@ func (p *Plugin) upsertAccountInRuntime(
 		return api.AdminAccount{}, err
 	}
 	if accountID != "" && !forceUpdate {
-		if existing, ok := rt.Pool().AccountByID(accountID); ok && existing != nil && existing.State != aistudio.AccountAuthRequired {
+		if existing, ok := rt.Pool().AccountByID(accountID); ok && existing != nil &&
+			(existing.State != aistudio.AccountAuthRequired || sameCoreAuthCookies(existing.StorageState, state)) {
 			accounts, _ := rt.Admin.Accounts(ctx)
 			for _, acc := range accounts {
 				if strings.EqualFold(acc.ID, accountID) {
@@ -374,7 +379,8 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 	// Immediately launch the local Chrome Incognito window in the background when the user clicks "Start Login" in ECPA
 	if os.Getenv("AISTUDIO2API_NO_AUTO_BROWSER") == "" {
 		if chromeBin, _ := aistudio.FindLocalChromeBinary(); chromeBin != "" && p.chromeLogin.TryLock() {
-			go func(state string, proxy string, cbID string) {
+			loginCtx := p.pluginCtx()
+			go func(ctx context.Context, state string, proxy string, cbID string) {
 				defer p.chromeLogin.Unlock()
 				defer func() {
 					if r := recover(); r != nil {
@@ -386,7 +392,7 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 						p.loginStateMu.Unlock()
 					}
 				}()
-				created, loginErr := rt.Admin.CreateAccount(p.ctx, api.AccountCreateInput{
+				created, loginErr := rt.Admin.CreateAccount(ctx, api.AccountCreateInput{
 					Proxy: proxy,
 				}, nil)
 
@@ -405,9 +411,9 @@ func (p *Plugin) handleAuthLoginStart(raw []byte) (any, error) {
 
 				if loginErr == nil {
 					_ = p.SyncAccountToHostAuth(cbID, created)
-					go func() { _ = rt.EnsureRunning(p.ctx) }()
+					p.startRuntimeAsync(rt)
 				}
-			}(stateID, proxyURL, hostCallbackID)
+			}(loginCtx, stateID, proxyURL, hostCallbackID)
 		}
 	}
 
@@ -536,7 +542,9 @@ func (p *Plugin) handleAuthRefresh(raw []byte) (any, error) {
 		}, nil
 	}
 
-	_, _ = rt.RefreshAccountModels(p.ctx, accountID)
+	if existing, ok := rt.Pool().AccountByID(accountID); !ok || existing == nil || existing.State != aistudio.AccountAuthRequired {
+		_, _ = rt.RefreshAccountModels(p.ctx, accountID)
+	}
 	accounts, _ := rt.Admin.Accounts(p.ctx)
 	for _, acc := range accounts {
 		if strings.EqualFold(acc.ID, accountID) {
@@ -593,7 +601,10 @@ func (p *Plugin) buildAuthDataForAccountWithExisting(
 	accountID := strings.ToLower(strings.TrimSpace(acc.ID))
 	fileName := fmt.Sprintf("aistudio2api-%s.json", sanitizeFileComponent(accountID))
 	serviceStopped := p.serviceStopped.Load()
-	disabled := !acc.Enabled || acc.State == string(aistudio.AccountRestricted) || serviceStopped
+	disabled := !acc.Enabled ||
+		acc.State == string(aistudio.AccountRestricted) ||
+		acc.State == string(aistudio.AccountAuthRequired) ||
+		serviceStopped
 
 	payload := AuthFilePayload{
 		Type:           ProviderID,
@@ -924,6 +935,43 @@ func (p *Plugin) RemoveAccountFromHostAuth(accountID string) {
 	}
 	fileName := fmt.Sprintf("aistudio2api-%s.json", sanitizeFileComponent(strings.ToLower(strings.TrimSpace(accountID))))
 	_ = os.Remove(filepath.Join(authDir, fileName))
+}
+
+func (p *Plugin) syncDegradedAccountIfChanged(callbackID string, rt *app.PluginRuntime, accountID string) {
+	accountID = strings.ToLower(strings.TrimSpace(accountID))
+	if accountID == "" || rt == nil || rt.Pool() == nil || !boolOrDefault(p.Config().SyncAuthFiles, true) {
+		return
+	}
+	poolAcc, ok := rt.Pool().AccountByID(accountID)
+	if !ok || poolAcc == nil {
+		return
+	}
+	curState := string(poolAcc.State)
+	isDegraded := poolAcc.State == aistudio.AccountAuthRequired || poolAcc.State == aistudio.AccountRestricted
+
+	p.unhealthySyncMu.Lock()
+	if !isDegraded {
+		delete(p.unhealthySynced, accountID)
+		p.unhealthySyncMu.Unlock()
+		return
+	}
+	if p.unhealthySynced[accountID] == curState {
+		p.unhealthySyncMu.Unlock()
+		return
+	}
+	p.unhealthySynced[accountID] = curState
+	p.unhealthySyncMu.Unlock()
+
+	accounts, err := rt.Admin.Accounts(p.ctx)
+	if err != nil {
+		return
+	}
+	for _, acc := range accounts {
+		if strings.EqualFold(acc.ID, accountID) {
+			_ = p.SyncAccountToHostAuth(callbackID, acc)
+			return
+		}
+	}
 }
 
 func extractAccountIDFromAuth(storageJSON []byte, metadata map[string]any, attributes map[string]string) string {

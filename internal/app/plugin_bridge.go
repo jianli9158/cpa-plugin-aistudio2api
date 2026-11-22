@@ -69,13 +69,15 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config) (*PluginRuntime, e
 		}
 	}
 	handler := api.NewHandler(mgr, api.Config{
-		Admin:          mgr,
-		MediaDir:       mediaDir,
-		MediaLinks:     mgr.mediaLinks,
-		ResponseModes:  mgr.responseModes,
-		SearchSettings: mgr.searchSettings,
-		WaitLaunch:     mgr.WaitLaunch,
-		EgressProxy:    mgr.egressProxy,
+		Admin:               mgr,
+		MediaDir:            mediaDir,
+		MediaLinks:          mgr.mediaLinks,
+		ResponseModes:       mgr.responseModes,
+		SearchSettings:      mgr.searchSettings,
+		WaitLaunch:          mgr.WaitLaunch,
+		EgressProxy:         mgr.egressProxy,
+		AllowedMCPHosts:     mgr.allowedMCPHosts,
+		AllowedWebhookHosts: mgr.allowedWebhookHosts,
 	})
 	rt := &PluginRuntime{
 		Manager: mgr,
@@ -89,6 +91,18 @@ func NewPluginRuntime(ctx context.Context, cfg config.Config) (*PluginRuntime, e
 		}()
 	}
 	return rt, nil
+}
+
+func (manager *runtimeManager) allowedMCPHosts() string {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.activeManagement.AllowedMCPHosts
+}
+
+func (manager *runtimeManager) allowedWebhookHosts() string {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return manager.activeManagement.AllowedWebhookHosts
 }
 
 // PublicHandler returns the HTTP handler for OpenAI, Responses, Anthropic, and Gemini endpoints.
@@ -207,9 +221,10 @@ func (rt *PluginRuntime) ApplyLiveConfig(cfg config.Config) {
 	if ts, ok := cur.service.(*trackedService); ok && ts != nil {
 		ts.SetFirstEventHedge(cfg.FirstEventHedge, cfg.FirstEventHedgeModels)
 		ts.buildNativeNonstream = cfg.BuildNativeNonstream
-		ts.maxAccountSwitches = cfg.MaxAccountSwitches
 		ts.discoverHiddenModels = cfg.DiscoverHiddenModels
-		ts.modelMapping, _ = config.ParseModelMapping(cfg.ModelMapping)
+		mapping, _ := config.ParseModelMapping(cfg.ModelMapping)
+		ts.SetRequestPolicy(mapping, cfg.MaxAccountSwitches)
+		rt.Manager.settings.Store(requestSettingsOf(cfg))
 		if pooled, ok := ts.service.(*aistudio.PooledService); ok && pooled != nil {
 			pooled.BuildNativeNonstream = cfg.BuildNativeNonstream
 			pooled.YouTubeLinks = cfg.YouTubeLinks
@@ -293,10 +308,31 @@ func (rt *PluginRuntime) CachedModels() []aistudio.Model {
 
 // RecentLogs returns recent runtime logs.
 func (rt *PluginRuntime) RecentLogs() []api.AdminLog {
+	return rt.RecentLogsLimited(0)
+}
+
+// RecentLogsLimited returns at most the latest limit runtime logs (all when limit <= 0).
+func (rt *PluginRuntime) RecentLogsLimited(limit int) []api.AdminLog {
 	if rt == nil || rt.Manager == nil || rt.Manager.requests == nil {
 		return nil
 	}
 	rt.Manager.requests.mu.Lock()
 	defer rt.Manager.requests.mu.Unlock()
-	return append([]api.AdminLog(nil), rt.Manager.requests.logs...)
+	logs := rt.Manager.requests.logs
+	if limit > 0 && len(logs) > limit {
+		logs = logs[len(logs)-limit:]
+	}
+	return append([]api.AdminLog(nil), logs...)
+}
+
+// SetLogHook installs or clears a callback receiving runtime log entries in place of raw stderr slog output.
+func (rt *PluginRuntime) SetLogHook(fn func(api.AdminLog)) {
+	if rt == nil || rt.Manager == nil || rt.Manager.requests == nil {
+		return
+	}
+	if fn == nil {
+		rt.Manager.requests.logHook.Store(nil)
+		return
+	}
+	rt.Manager.requests.logHook.Store(&fn)
 }

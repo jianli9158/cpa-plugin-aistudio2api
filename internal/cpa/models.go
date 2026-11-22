@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
-	"github.com/Mag1cFall/AIStudio2API/internal/config"
 	"github.com/Mag1cFall/AIStudio2API/internal/pluginapi"
 )
 
@@ -194,17 +193,13 @@ func (p *Plugin) isKnownModel(modelID string) bool {
 		return false
 	}
 	p.mu.RLock()
-	mappingStr := p.appCfg.ModelMapping
+	mappings := p.modelMappings
 	rt := p.runtime
 	p.mu.RUnlock()
-	if mappingStr != "" {
-		if mappings, err := config.ParseModelMapping(mappingStr); err == nil {
-			for _, item := range mappings {
-				if strings.EqualFold(item.Alias, clean) && item.Model != "" {
-					clean = strings.TrimPrefix(item.Model, "models/")
-					break
-				}
-			}
+	for _, item := range mappings {
+		if strings.EqualFold(item.Alias, clean) && item.Model != "" {
+			clean = strings.TrimPrefix(item.Model, "models/")
+			break
 		}
 	}
 	clean = strings.TrimSuffix(clean, "-search")
@@ -279,33 +274,29 @@ func (p *Plugin) collectCatalogModelsForAccount(accountID string) []pluginapi.Mo
 		}
 	}
 
-	p.mu.RLock()
-	mappingStr := p.appCfg.ModelMapping
-	p.mu.RUnlock()
-	if mappingStr != "" {
-		if mappings, err := config.ParseModelMapping(mappingStr); err == nil {
-			byID := make(map[string]pluginapi.ModelInfo, len(out))
-			for _, item := range out {
-				byID[strings.ToLower(item.ID)] = item
+	mappings := p.cachedModelMappings()
+	if len(mappings) > 0 {
+		byID := make(map[string]pluginapi.ModelInfo, len(out))
+		for _, item := range out {
+			byID[strings.ToLower(item.ID)] = item
+		}
+		for _, m := range mappings {
+			alias := strings.TrimSpace(m.Alias)
+			target := strings.TrimPrefix(strings.TrimSpace(m.Model), "models/")
+			if alias == "" || target == "" {
+				continue
 			}
-			for _, m := range mappings {
-				alias := strings.TrimSpace(m.Alias)
-				target := strings.TrimPrefix(strings.TrimSpace(m.Model), "models/")
-				if alias == "" || target == "" {
-					continue
-				}
-				if base, ok := byID[strings.ToLower(target)]; ok {
-					aliasInfo := base
-					aliasInfo.ID = alias
-					aliasInfo.Name = "models/" + alias
-					aliasInfo.DisplayName = alias + " -> " + base.DisplayName
-					addModel(aliasInfo)
-				} else {
-					addModel(convertAIStudioModel(aistudio.Model{
-						ID:   "models/" + alias,
-						Name: alias,
-					}))
-				}
+			if base, ok := byID[strings.ToLower(target)]; ok {
+				aliasInfo := base
+				aliasInfo.ID = alias
+				aliasInfo.Name = "models/" + alias
+				aliasInfo.DisplayName = alias + " -> " + base.DisplayName
+				addModel(aliasInfo)
+			} else {
+				addModel(convertAIStudioModel(aistudio.Model{
+					ID:   "models/" + alias,
+					Name: alias,
+				}))
 			}
 		}
 	}
@@ -529,17 +520,7 @@ func (p *Plugin) resolveConfiguredModelMapping(modelID string) string {
 	if clean == "" {
 		return ""
 	}
-	p.mu.RLock()
-	mappingStr := p.appCfg.ModelMapping
-	p.mu.RUnlock()
-	if mappingStr == "" {
-		return ""
-	}
-	mappings, err := config.ParseModelMapping(mappingStr)
-	if err != nil {
-		return ""
-	}
-	for _, item := range mappings {
+	for _, item := range p.cachedModelMappings() {
 		if strings.EqualFold(strings.TrimSpace(item.Alias), clean) && strings.TrimSpace(item.Model) != "" {
 			return strings.TrimPrefix(strings.TrimSpace(item.Model), "models/")
 		}

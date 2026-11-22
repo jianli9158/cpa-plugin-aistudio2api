@@ -23,12 +23,38 @@ type AccountTask struct {
 	StartedAt time.Time         `json:"started_at"`
 }
 
-// AccountTaskItem 是任务中的一个账户，Label 为邮箱，浏览器登录完成前为空
+// AccountTaskItem 是任务中的一个账户，Label 为邮箱，浏览器登录完成前为空；Step 是处理中的账户当前的步骤
 type AccountTaskItem struct {
 	Label string `json:"label"`
 	State string `json:"state"`
+	Step  string `json:"step,omitempty"`
 	Code  string `json:"code,omitempty"`
 	Error string `json:"error,omitempty"`
+}
+
+// 账户任务中一个账户的步骤：等待在浏览器中登录、读取浏览器里的登录状态、检查 AI Studio 访问、保存账户
+const (
+	TaskStepLogin    = "login"
+	TaskStepReading  = "reading"
+	TaskStepChecking = "checking"
+	TaskStepSaving   = "saving"
+)
+
+type taskStepContextKey struct{}
+
+type taskLabelContextKey struct{}
+
+// TaskLabel 返回 ctx 所属账户任务正在处理的账户标签，ctx 不属于账户任务时为空串
+func TaskLabel(ctx context.Context) string {
+	label, _ := ctx.Value(taskLabelContextKey{}).(string)
+	return label
+}
+
+// ReportTaskStep 把账户进入的步骤显示到它所在的账户任务，ctx 不属于账户任务时不做任何事
+func ReportTaskStep(ctx context.Context, step string) {
+	if report, ok := ctx.Value(taskStepContextKey{}).(func(string)); ok {
+		report(step)
+	}
 }
 
 // chromeImportRequest 是从本机 Chrome 导入的账号与共用的账户环境
@@ -172,20 +198,36 @@ func (tasks *accountTasks) publishLocked() {
 	}
 }
 
-// runAccountTaskItems 依次处理任务中的各个账户，单个账户失败时记录原因后继续下一个，任务被取消后停止
-func runAccountTaskItems(ctx context.Context, update accountTaskUpdate, count int, run func(int) (AdminAccount, error)) {
-	for index := 0; index < count && ctx.Err() == nil; index++ {
-		update(func(task *AccountTask) { task.Items[index].State = "running" })
-		account, err := run(index)
-		update(func(task *AccountTask) {
-			item := &task.Items[index]
-			if err != nil {
-				item.State, item.Code, item.Error = "failed", codeFromError(err, ""), err.Error()
+// runAccountTaskItems 同时处理任务中的各个账户，每个账户各自验证、保存并更新结果，单个账户失败或较慢时不影响其他账户，任务被取消后不再开始处理
+// run 收到的 ctx 带该账户的步骤回调
+func runAccountTaskItems(ctx context.Context, update accountTaskUpdate, count int, run func(context.Context, int) (AdminAccount, error)) {
+	var group sync.WaitGroup
+	for index := range count {
+		group.Go(func() {
+			if ctx.Err() != nil {
 				return
 			}
-			item.State, item.Label = "done", account.Label
+			var label string
+			update(func(task *AccountTask) {
+				task.Items[index].State = "running"
+				label = task.Items[index].Label
+			})
+			itemCtx := context.WithValue(ctx, taskLabelContextKey{}, label)
+			account, err := run(context.WithValue(itemCtx, taskStepContextKey{}, func(step string) {
+				update(func(task *AccountTask) { task.Items[index].Step = step })
+			}), index)
+			update(func(task *AccountTask) {
+				item := &task.Items[index]
+				item.Step = ""
+				if err != nil {
+					item.State, item.Code, item.Error = "failed", codeFromError(err, ""), err.Error()
+					return
+				}
+				item.State, item.Label = "done", account.Label
+			})
 		})
 	}
+	group.Wait()
 }
 
 // startAccountTask 登记并启动账户任务，返回 202 与任务
@@ -224,7 +266,7 @@ func (s *server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
 		defer release()
-		runAccountTaskItems(ctx, update, 1, func(int) (AdminAccount, error) {
+		runAccountTaskItems(ctx, update, 1, func(ctx context.Context, _ int) (AdminAccount, error) {
 			return s.config.Admin.CreateAccount(ctx, input.AccountCreateInput, view)
 		})
 	})
@@ -249,13 +291,13 @@ func (s *server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
 		defer release()
-		runAccountTaskItems(ctx, update, 1, func(int) (AdminAccount, error) {
+		runAccountTaskItems(ctx, update, 1, func(ctx context.Context, _ int) (AdminAccount, error) {
 			return s.config.Admin.LoginAccount(ctx, id, view)
 		})
 	})
 }
 
-// handleImportChromeAccounts 在账户任务中逐个导入选中的本机 Chrome 账号
+// handleImportChromeAccounts 在账户任务中同时导入选中的本机 Chrome 账号，各账号独立保存
 func (s *server) handleImportChromeAccounts(w http.ResponseWriter, r *http.Request) {
 	var input chromeImportRequest
 	if err := decodeJSON(r, &input); err != nil {
@@ -267,7 +309,7 @@ func (s *server) handleImportChromeAccounts(w http.ResponseWriter, r *http.Reque
 		task.Items[index] = AccountTaskItem{Label: account.Email, State: "pending"}
 	}
 	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
-		runAccountTaskItems(ctx, update, len(input.Accounts), func(index int) (AdminAccount, error) {
+		runAccountTaskItems(ctx, update, len(input.Accounts), func(ctx context.Context, index int) (AdminAccount, error) {
 			accounts, err := s.config.Admin.ImportChromeAccounts(ctx, ChromeImportInput{
 				AccountIDs: []string{input.Accounts[index].ID},
 				Proxy:      input.Proxy, Locale: input.Locale, Timezone: input.Timezone,
@@ -280,7 +322,7 @@ func (s *server) handleImportChromeAccounts(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// handleImportCookieAccounts 在账户任务中逐个导入 Cookie 文本或调试浏览器中的账户
+// handleImportCookieAccounts 在账户任务中同时导入 Cookie 文本或调试浏览器中的账户，各账号独立保存
 func (s *server) handleImportCookieAccounts(w http.ResponseWriter, r *http.Request) {
 	var input cookieImportRequest
 	if err := decodeJSON(r, &input); err != nil {
@@ -295,23 +337,24 @@ func (s *server) handleImportCookieAccounts(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
-		runAccountTaskItems(ctx, update, len(input.Items), func(index int) (AdminAccount, error) {
+		runAccountTaskItems(ctx, update, len(input.Items), func(ctx context.Context, index int) (AdminAccount, error) {
 			return s.importCookieAccount(ctx, input.Items[index], input.Proxy, input.Locale, input.Timezone)
 		})
 	})
 }
 
-// importCookieAccount 读取调试浏览器的 Cookie 或解析 Cookie 文本，导入第 auth_user 个会话登录的账户
+// importCookieAccount 读取调试浏览器的 Cookie 或解析 Cookie 文本，以识别会话时得到的邮箱为标签导入第 auth_user 个会话登录的账户
 func (s *server) importCookieAccount(ctx context.Context, item cookieImportItem, proxy string, locale string, timezone string) (AdminAccount, error) {
 	cookies := item.Cookies
 	if strings.TrimSpace(item.CDP) != "" {
 		return AdminAccount{}, errors.New("插件模式不支持连接本机浏览器，请粘贴 Cookie 导入")
 	}
+	ReportTaskStep(ctx, TaskStepReading)
 	state, err := aistudio.ParseCookieText(cookies)
 	if err != nil {
 		return AdminAccount{}, err
 	}
 	return s.config.Admin.ImportAccountState(ctx, AccountStateInput{
-		Proxy: proxy, Locale: locale, Timezone: timezone, AuthUser: item.AuthUser, StorageState: state,
+		Label: item.Email, Proxy: proxy, Locale: locale, Timezone: timezone, AuthUser: item.AuthUser, StorageState: state,
 	})
 }

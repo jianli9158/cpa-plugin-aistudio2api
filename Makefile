@@ -7,23 +7,28 @@ LIBWEBP_DIR := $(CURDIR)/libwebp
 ifeq ($(GOOS),darwin)
   EXT := .dylib
   SM_PLATFORM := $(GOOS)-$(GOARCH)
+  EXTLDFLAGS := -Wl,-exported_symbols_list,$(CURDIR)/cmd/aistudio2api-plugin/exports_darwin.txt -Wl,-dead_strip
 else ifeq ($(GOOS),windows)
   EXT := .dll
   SM_PLATFORM := $(GOOS)-$(GOARCH)
+  EXTLDFLAGS :=
 else
   EXT := .so
+  EXTLDFLAGS := -Wl,--version-script=$(CURDIR)/cmd/aistudio2api-plugin/exports_linux.map -Wl,--gc-sections
   ifeq ($(GOARCH),amd64)
     ifeq ($(LINUX_GLIBC),2.28)
       SM_PLATFORM := linux-amd64-glibc228
     else
       SM_PLATFORM := linux-amd64-gnu
     endif
+  else ifeq ($(GOARCH),arm64)
+    SM_PLATFORM := linux-arm64-glibc228
   else
     SM_PLATFORM := $(GOOS)-$(GOARCH)
   endif
 endif
 
-ifneq (,$(filter windows-arm64 linux-amd64-glibc228,$(SM_PLATFORM)))
+ifneq (,$(filter windows-arm64 linux-amd64-glibc228 linux-arm64-glibc228,$(SM_PLATFORM)))
   SM_URL := https://github.com/jianli9158/cpa-plugin-aistudio2api/releases/download/deps-v1/spidermonkey-$(SPIDERMONKEY_VERSION)-$(SM_PLATFORM).tar.gz
   WEBP_URL := https://github.com/jianli9158/cpa-plugin-aistudio2api/releases/download/deps-v1/libwebp-$(LIBWEBP_VERSION)-$(SM_PLATFORM).tar.gz
 else
@@ -54,7 +59,7 @@ build: spidermonkey
 	CGO_ENABLED=1 \
 	CGO_CPPFLAGS="-I$(SPIDERMONKEY_DIR)/include -I$(LIBWEBP_DIR)/include" \
 	CGO_LDFLAGS="-L$(SPIDERMONKEY_DIR)/lib -L$(LIBWEBP_DIR)/lib" \
-	go build -trimpath -ldflags="-s -w" -buildmode=c-shared -o $(OUT_FILE) ./cmd/aistudio2api-plugin
+	go build -trimpath -ldflags="-s -w $(if $(EXTLDFLAGS),-extldflags '$(EXTLDFLAGS)')" -buildmode=c-shared -o $(OUT_FILE) ./cmd/aistudio2api-plugin
 
 test: spidermonkey
 	export CGO_ENABLED=1 \

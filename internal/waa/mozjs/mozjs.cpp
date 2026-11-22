@@ -7,12 +7,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "mozilla/SHA1.h"
 #include "jsapi.h"
 #include "jsfriendapi.h"
 #include "js/Array.h"
@@ -691,14 +693,91 @@ static bool canUseJit() {
 }
 #endif
 
-// StencilBuildId 是进程内 XDR 编码使用的构建标识
-static bool StencilBuildId(JS::BuildIdCharVector* buildId) { return buildId->append("aistudio2api", 12); }
+#define MZ_STR_DETAIL(x) #x
+#define MZ_STR(x) MZ_STR_DETAIL(x)
+static constexpr const char kStencilBuildId[] =
+    "aistudio2api-sm" MZ_STR(MOZJS_MAJOR_VERSION) "." MZ_STR(MOZJS_MINOR_VERSION);
 
-// stencilMutex 保护 stencilCache
+// StencilBuildId 是进程内 XDR 编码使用的构建标识（绑定 SpiderMonkey 版本）
+static bool StencilBuildId(JS::BuildIdCharVector* buildId) {
+  return buildId->append(kStencilBuildId, sizeof(kStencilBuildId) - 1);
+}
+
+struct StencilKey {
+  uint8_t digest[mozilla::SHA1Sum::kHashSize];
+  size_t sourceLen;
+  uint32_t line;
+
+  bool operator==(const StencilKey& other) const {
+    return sourceLen == other.sourceLen && line == other.line &&
+           memcmp(digest, other.digest, sizeof(digest)) == 0;
+  }
+};
+
+struct StencilKeyHash {
+  size_t operator()(const StencilKey& key) const noexcept {
+    size_t h = 0;
+    memcpy(&h, key.digest, sizeof(h));
+    return h ^ (key.sourceLen << 1) ^ size_t(key.line);
+  }
+};
+
+static StencilKey MakeStencilKey(const char* filename, uint32_t line, const char* source, size_t len) {
+  mozilla::SHA1Sum sha1;
+  const size_t nameLen = filename ? strlen(filename) : 0;
+  if (nameLen > 0) {
+    sha1.update(filename, static_cast<uint32_t>(nameLen));
+  }
+  const uint8_t sep = 0;
+  sha1.update(&sep, 1);
+  sha1.update(&line, sizeof(line));
+  const uint64_t totalLen = static_cast<uint64_t>(len);
+  sha1.update(&totalLen, sizeof(totalLen));
+  size_t offset = 0;
+  while (offset < len) {
+    const size_t chunk = (len - offset > 0x40000000ULL) ? 0x40000000ULL : (len - offset);
+    sha1.update(source + offset, static_cast<uint32_t>(chunk));
+    offset += chunk;
+  }
+  StencilKey key{};
+  sha1.finish(key.digest);
+  key.sourceLen = len;
+  key.line = line;
+  return key;
+}
+
+struct StencilEntry {
+  StencilKey key;
+  std::shared_ptr<JS::TranscodeBuffer> buffer;
+  size_t bytes;
+};
+
+static constexpr size_t kMaxStencilEntries = 48;
+static constexpr size_t kMaxStencilBytes = 32 * 1024 * 1024;
+static constexpr size_t kMaxSingleStencilBytes = 8 * 1024 * 1024;
+
+// stencilMutex 保护有界 LRU stencil 缓存
 static std::mutex stencilMutex;
-// stencilCache 保存进程内各脚本的 XDR 编码编译结果，键为文件名、行号与源码
-static std::unordered_map<std::string, std::shared_ptr<JS::TranscodeBuffer>> stencilCache;
+static std::list<StencilEntry> stencilLRU;
+static std::unordered_map<StencilKey, std::list<StencilEntry>::iterator, StencilKeyHash> stencilIndex;
+static size_t stencilTotalBytes = 0;
 
+extern "C" void mz_clear_stencil_cache(void) {
+  std::lock_guard<std::mutex> lock(stencilMutex);
+  stencilIndex.clear();
+  stencilLRU.clear();
+  stencilTotalBytes = 0;
+}
+
+extern "C" void mz_stencil_cache_stats(size_t* entries, size_t* bytes) {
+  std::lock_guard<std::mutex> lock(stencilMutex);
+  if (entries) {
+    *entries = stencilLRU.size();
+  }
+  if (bytes) {
+    *bytes = stencilTotalBytes;
+  }
+}
 extern "C" const char* mz_init(void) {
 #ifdef __APPLE__
   if (!canUseJit()) {
@@ -808,13 +887,14 @@ extern "C" bool mz_evaluate(mz_context* mz, uint32_t global, const char* source,
   options.setFileAndLine(filename, line).setIsRunOnce(true);
   JS::SourceText<mozilla::Utf8Unit> text;
   JS::RootedValue rval(cx);
-  std::string key = std::string(filename) + "|" + std::to_string(line) + "|" + std::string(source, len);
+  const StencilKey key = MakeStencilKey(filename, line, source, len);
   std::shared_ptr<JS::TranscodeBuffer> cached;
   {
     std::lock_guard<std::mutex> lock(stencilMutex);
-    auto found = stencilCache.find(key);
-    if (found != stencilCache.end()) {
-      cached = found->second;
+    auto found = stencilIndex.find(key);
+    if (found != stencilIndex.end()) {
+      stencilLRU.splice(stencilLRU.begin(), stencilLRU, found->second);
+      cached = found->second->buffer;
     }
   }
   RefPtr<JS::Stencil> stencil;
@@ -839,8 +919,22 @@ extern "C" bool mz_evaluate(mz_context* mz, uint32_t global, const char* source,
     }
     auto buffer = std::make_shared<JS::TranscodeBuffer>();
     if (JS::EncodeStencil(cx, stencil, *buffer) == JS::TranscodeResult::Ok) {
-      std::lock_guard<std::mutex> lock(stencilMutex);
-      stencilCache.emplace(key, buffer);
+      const size_t encodedBytes = buffer->length();
+      if (encodedBytes > 0 && encodedBytes <= kMaxSingleStencilBytes) {
+        std::lock_guard<std::mutex> lock(stencilMutex);
+        if (stencilIndex.find(key) == stencilIndex.end()) {
+          while (!stencilLRU.empty() &&
+                 (stencilLRU.size() >= kMaxStencilEntries || stencilTotalBytes + encodedBytes > kMaxStencilBytes)) {
+            const auto& tail = stencilLRU.back();
+            stencilTotalBytes -= tail.bytes;
+            stencilIndex.erase(tail.key);
+            stencilLRU.pop_back();
+          }
+          stencilLRU.push_front(StencilEntry{key, buffer, encodedBytes});
+          stencilIndex.emplace(key, stencilLRU.begin());
+          stencilTotalBytes += encodedBytes;
+        }
+      }
     }
   }
   JS::InstantiateOptions instantiate(options);

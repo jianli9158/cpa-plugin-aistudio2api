@@ -1,0 +1,5 @@
+_cliproxy_plugin_init
+_cliproxyPluginInit
+_cliproxyPluginCall
+_cliproxyPluginFree
+_cliproxyPluginShutdown

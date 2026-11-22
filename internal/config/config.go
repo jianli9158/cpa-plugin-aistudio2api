@@ -160,6 +160,8 @@ type Config struct {
 	WAABackend             string
 	MediaOutput            string
 	MediaBaseURL           string
+	AllowedMCPHosts        string
+	AllowedWebhookHosts    string
 	// Invalid 是加载时取值无效、改用默认值的配置项
 	Invalid []InvalidValue
 	// Environment 是取自进程环境变量、覆盖 .env 的配置键

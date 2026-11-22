@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,6 +104,7 @@ func (p *Plugin) handleManagementRegister() (any, error) {
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/discover-cookies", Description: "Discover Google accounts inside pasted Cookie text"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/refresh", Description: "Refresh an account's model catalog and benefit tier"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/update", Description: "Update account settings (enabled, proxy, locale, timezone)"},
+			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/state", Description: "Set an account state to ready or disabled"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/delete", Description: "Delete an account"},
 			{Method: http.MethodGet, Path: "/v0/management/aistudio2api/accounts/exits", Description: "Inspect egress IP, country, timezone, and locale per configured proxy"},
 			{Method: http.MethodPost, Path: "/v0/management/aistudio2api/accounts/sync-auth", Description: "Sync all AIStudio2API accounts to CLIProxyAPI auths/ directory"},
@@ -128,7 +130,9 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 
 	rawPath := strings.TrimSpace(req.Path)
 	path := rawPath
+	var rawQuery url.Values
 	if idx := strings.IndexByte(rawPath, '?'); idx >= 0 {
+		rawQuery, _ = url.ParseQuery(rawPath[idx+1:])
 		path = rawPath[:idx]
 	}
 	method := strings.ToUpper(strings.TrimSpace(req.Method))
@@ -214,7 +218,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			p.serviceStopped.Store(false)
 		}
 		_ = p.SyncAccountToHostAuth(req.HostCallbackID, created)
-		go func() { _ = rt.EnsureRunning(p.ctx) }()
+		p.startRuntimeAsync(rt)
 		return jsonManagementResponse(http.StatusCreated, map[string]any{"account": redactAdminAccount(created)}), nil
 	case method == http.MethodPost && path == "/v0/management/aistudio2api/accounts/relogin":
 		if !p.chromeLogin.TryLock() {
@@ -273,7 +277,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			p.serviceStopped.Store(false)
 		}
 		_ = p.SyncAccountToHostAuth(req.HostCallbackID, updated)
-		go func() { _ = rt.EnsureRunning(p.ctx) }()
+		p.startRuntimeAsync(rt)
 		return jsonManagementResponse(http.StatusOK, map[string]any{"account": redactAdminAccount(updated)}), nil
 	case method == http.MethodPost && path == "/v0/management/aistudio2api/accounts/discover-cookies":
 		var input api.CookieImportInput
@@ -332,7 +336,7 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 			p.serviceStopped.Store(false)
 		}
 		_ = p.SyncAccountToHostAuth(req.HostCallbackID, created)
-		go func() { _ = rt.EnsureRunning(p.ctx) }()
+		p.startRuntimeAsync(rt)
 		return jsonManagementResponse(http.StatusCreated, map[string]any{"account": redactAdminAccount(created)}), nil
 
 	case method == http.MethodPost && path == "/v0/management/aistudio2api/accounts/refresh":
@@ -403,6 +407,34 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		}
 		_ = p.SyncAccountToHostAuth(req.HostCallbackID, updated)
 		return jsonManagementResponse(http.StatusOK, map[string]any{"account": redactAdminAccount(updated)}), nil
+
+	case method == http.MethodPost && path == "/v0/management/aistudio2api/accounts/state":
+		var body struct {
+			AccountID string `json:"account_id"`
+			State     string `json:"state"`
+		}
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]any{"error": err.Error()}), nil
+		}
+		accountID := strings.TrimSpace(body.AccountID)
+		targetState := strings.ToLower(strings.TrimSpace(body.State))
+		if accountID == "" {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]any{"error": "account_id is required"}), nil
+		}
+		updated, err := rt.Admin.SetAccountState(p.ctx, accountID, targetState)
+		if err != nil {
+			return jsonManagementResponse(http.StatusBadRequest, map[string]any{"error": err.Error()}), nil
+		}
+		if targetState == string(aistudio.AccountReady) {
+			p.unhealthySyncMu.Lock()
+			delete(p.unhealthySynced, strings.ToLower(accountID))
+			p.unhealthySyncMu.Unlock()
+		}
+		_ = p.SyncAccountToHostAuth(req.HostCallbackID, updated)
+		if updated.Enabled && !p.serviceStopped.Load() {
+			p.startRuntimeAsync(rt)
+		}
+		return jsonManagementResponse(http.StatusOK, map[string]any{"account": redactAdminAccount(updated)}), nil
 	case method == http.MethodPost && path == "/v0/management/aistudio2api/accounts/delete":
 		var body struct {
 			AccountID string `json:"account_id"`
@@ -458,9 +490,17 @@ func (p *Plugin) handleManagementHandle(raw []byte) (any, error) {
 		return jsonManagementResponse(http.StatusOK, map[string]any{"models": models}), nil
 
 	case method == http.MethodGet && path == "/v0/management/aistudio2api/logs":
-		logs := rt.RecentLogs()
+		limit := 0
+		if vals := req.Query["limit"]; len(vals) > 0 {
+			limit, _ = strconv.Atoi(strings.TrimSpace(vals[0]))
+		} else if rawQuery != nil {
+			limit, _ = strconv.Atoi(strings.TrimSpace(rawQuery.Get("limit")))
+		}
+		if limit > 2000 {
+			limit = 2000
+		}
+		logs := rt.RecentLogsLimited(limit)
 		return jsonManagementResponse(http.StatusOK, map[string]any{"logs": logs}), nil
-
 	default:
 		return jsonManagementResponse(http.StatusNotFound, map[string]any{
 			"error": fmt.Sprintf("route %s %s not found", method, path),

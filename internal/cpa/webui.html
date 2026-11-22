@@ -159,6 +159,7 @@
     box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
     background: rgba(9, 14, 26, 0.85);
   }
+  select option { background: #0f172a; color: var(--text); }
 
   button {
     display: inline-flex;
@@ -704,7 +705,10 @@
 </div>
 
 <script>
-const language = localStorage.getItem('cpa_aistudio2api_language') === 'en' ? 'en' : 'zh-CN';
+let language = 'zh-CN';
+try {
+  if (sessionStorage.getItem('cpa_aistudio2api_language') === 'en') language = 'en';
+} catch (_) {}
 const translations = {
   'AIStudio2API 插件控制台 · CLIProxyAPI': 'AIStudio2API Plugin Console · CLIProxyAPI',
   'AIStudio2API 插件控制台': 'AIStudio2API Plugin Console',
@@ -765,16 +769,24 @@ const translations = {
   '未填入管理密钥': 'Management key not set',
   '已配置管理密钥': 'Management key configured',
   '输入 CPA 管理密钥': 'Enter CPA management key',
-  '管理密钥已保存，正在加载运行状态...': 'Management key saved; loading status...',
-  '已清除保存的管理密钥': 'Saved management key cleared',
+  '管理密钥已保存在当前会话，正在加载运行状态...': 'Management key saved for this session; loading status...',
+  '已清除当前会话保存的管理密钥': 'Saved management key cleared for this session',
   '待填入密钥': 'Key required',
   '加载中': 'Loading',
   '保存密钥': 'Save key',
   '启动生成服务': 'Start generation service',
   '停止生成服务': 'Stop generation service',
   '启动服务': 'Start service',
+  '启动中': 'Starting',
+  '停止中': 'Stopping',
   '启动中...': 'Starting...',
   '停止中...': 'Stopping...',
+  '检测代理池': 'Probing proxies',
+  '读取模型目录': 'Loading catalog',
+  '预热 Worker': 'Warming workers',
+  '停止在途请求': 'Canceling requests',
+  '停止目录同步': 'Stopping catalog sync',
+  '关闭 Worker': 'Closing workers',
   '检查出口 IP': 'Check exit IPs',
   '刷新列表': 'Refresh list',
   '刷新日志': 'Refresh logs',
@@ -802,10 +814,21 @@ const translations = {
   '出口: ': 'Exit: ',
   '结束: ': 'Ends: ',
   '正常就绪': 'Ready',
+  '目录同步提示': 'Catalog sync notice',
+  '目录同步失败': 'Catalog sync failed',
+  '恢复就绪': 'Restore ready',
+  '已将账户 ': 'Restored account ',
+  ' 恢复为就绪状态': ' to ready state',
+  '恢复就绪失败: ': 'Failed to restore account: ',
   '清除此项冷却': 'Clear this cooldown',
   '清除冷却': 'Clear cooldown',
   '排空中': 'Draining',
   '同步中': 'Syncing',
+  '保存中': 'Saving',
+  '刷新中': 'Refreshing',
+  '等待请求': 'Waiting',
+  '读取目录': 'Catalog',
+  '核对验证': 'Verifying',
   '并发 ': 'Active requests: ',
   '无痕重登': 'Sign in again',
   '刷新目录': 'Refresh catalog',
@@ -875,27 +898,47 @@ const translations = {
   'CPA 管理密钥错误 (HTTP ': 'Invalid CPA management key (HTTP ',
   ')，已停止重复请求以防止 IP 被封禁，请核对右上角管理密钥': '). Repeated requests have been stopped to prevent an IP ban; check the management key above.'
 };
-const translationEntries = Object.entries(translations).sort((a, b) => b[0].length - a[0].length);
 function t(value) {
-  if (language !== 'en') return value;
-  for (const [zh, en] of translationEntries) value = value.split(zh).join(en);
+  if (language !== 'en' || typeof value !== 'string') return value;
+  if (Object.prototype.hasOwnProperty.call(translations, value)) return translations[value];
   return value;
 }
+function translateDomText(value) {
+  if (language !== 'en' || typeof value !== 'string') return value;
+  const match = value.match(/^(\s*)([\s\S]*?)(\s*)$/);
+  if (!match || !match[2]) return value;
+  const [, leading, core, trailing] = match;
+  if (Object.prototype.hasOwnProperty.call(translations, core)) {
+    return leading + translations[core] + trailing;
+  }
+  let out = core;
+  for (const suffix of [' 个账户', ' 项冷却中', ' 项冷却']) {
+    if (out.includes(suffix)) out = out.split(suffix).join(translations[suffix]);
+  }
+  return leading + out + trailing;
+}
 document.documentElement.lang = language;
-document.getElementById('language').value = language;
-document.getElementById('language').addEventListener('change', e => {
-  localStorage.setItem('cpa_aistudio2api_language', e.target.value);
-  location.reload();
-});
+const languageEl = document.getElementById('language');
+if (languageEl) {
+  languageEl.value = language;
+  languageEl.addEventListener('change', e => {
+    try { sessionStorage.setItem('cpa_aistudio2api_language', e.target.value); } catch (_) {}
+    location.reload();
+  });
+}
 if (language === 'en') {
   document.title = t(document.title);
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
     const node = walker.currentNode;
-    if (node.parentElement.tagName !== 'SCRIPT' && !node.parentElement.closest('#language')) node.nodeValue = t(node.nodeValue);
+    const parent = node.parentElement;
+    if (!parent || parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE' || parent.closest('#language')) continue;
+    node.nodeValue = translateDomText(node.nodeValue);
   }
   document.querySelectorAll('[placeholder], [title]').forEach(el => {
-    for (const attr of ['placeholder', 'title']) if (el.hasAttribute(attr)) el.setAttribute(attr, t(el.getAttribute(attr)));
+    for (const attr of ['placeholder', 'title']) {
+      if (el.hasAttribute(attr)) el.setAttribute(attr, t(el.getAttribute(attr)));
+    }
   });
 }
 let lastRejectedKey = null;
@@ -935,16 +978,16 @@ function getKey() {
     updateKeyBadge();
     return input.value.trim();
   }
-  const candidates = ['cpa_aistudio2api_key', 'management_key', 'cpa-management-key', 'secret-key', 'secretKey', 'managementKey', 'apiKey', 'token'];
-  const stores = [localStorage, sessionStorage];
+  const candidates = ['cpa_aistudio2api_key', 'cpa_management_key', 'cpa-management-key', 'management_key', 'managementKey'];
+  const stores = [sessionStorage];
   try {
-    if (window.parent && window.parent !== window && window.parent.localStorage) {
-      stores.push(window.parent.localStorage);
+    if (window.parent && window.parent !== window && window.parent.sessionStorage) {
+      stores.push(window.parent.sessionStorage);
     }
   } catch (_) {}
   try {
-    if (window.opener && window.opener.localStorage) {
-      stores.push(window.opener.localStorage);
+    if (window.opener && window.opener.sessionStorage) {
+      stores.push(window.opener.sessionStorage);
     }
   } catch (_) {}
   for (const store of stores) {
@@ -965,14 +1008,15 @@ function getKey() {
 
 function saveKeyAndReload() {
   const k = document.getElementById('mgmtKey').value.trim();
+  try { localStorage.removeItem('cpa_aistudio2api_key'); } catch (_) {}
   if (k) {
-    localStorage.setItem('cpa_aistudio2api_key', k);
+    sessionStorage.setItem('cpa_aistudio2api_key', k);
     if (lastRejectedKey === k) lastRejectedKey = null;
-    showToast(t('管理密钥已保存，正在加载运行状态...'), false);
+    showToast(t('管理密钥已保存在当前会话，正在加载运行状态...'), false);
   } else {
-    localStorage.removeItem('cpa_aistudio2api_key');
+    sessionStorage.removeItem('cpa_aistudio2api_key');
     lastRejectedKey = null;
-    showToast(t('已清除保存的管理密钥'), false);
+    showToast(t('已清除当前会话保存的管理密钥'), false);
   }
   updateKeyBadge();
   loadStatus();
@@ -1031,12 +1075,12 @@ async function loadStatus() {
   if (!getKey()) {
     const badge = document.getElementById('stateBadge');
     if (badge) {
-      badge.innerHTML = t('<span class="status-dot"></span>待填入密钥');
+      badge.innerHTML = '<span class="status-dot"></span>' + escapeHtml(t('待填入密钥'));
       badge.className = 'badge warning';
     }
     const tbody = document.getElementById('accountsBody');
     if (tbody) {
-      tbody.innerHTML = t('<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">请先在页面右上角输入 CPA 管理密钥并点击「保存密钥」以加载账户池与状态</td></tr>');
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">' + escapeHtml(t('请先在页面右上角输入 CPA 管理密钥并点击「保存密钥」以加载账户池与状态')) + '</td></tr>';
     }
     return;
   }
@@ -1054,10 +1098,23 @@ async function loadStatus() {
     badge.className = 'badge ' + (isRunning ? 'success' : 'warning');
 
     const toggleBtn = document.getElementById('serviceToggleBtn');
+    const transitionLabels = {
+      probe_proxies: t('检测代理池'),
+      wait_catalog: t('读取模型目录'),
+      start_prewarm: t('预热 Worker'),
+      cancel_requests: t('停止在途请求'),
+      wait_catalog_stop: t('停止目录同步'),
+      close_workers: t('关闭 Worker')
+    };
+    const serverOffsetMs = st.time ? (Date.now() - new Date(st.time).getTime()) : 0;
+    window.__cpaServerOffsetMs = isNaN(serverOffsetMs) ? 0 : serverOffsetMs;
     if (toggleBtn) {
       toggleBtn.dataset.running = isRunning ? 'true' : 'false';
+      const stepText = st.transition ? (transitionLabels[st.transition] || st.transition) : '';
+      const elapsedText = st.transition_since ? formatTransitionElapsed(st.transition_since) : '';
+      const stepSuffix = stepText ? (' (' + stepText + (elapsedText ? ' ' + elapsedText : '') + ')') : '';
       if (state === 'LAUNCHING' || state === 'STOPPING') {
-        toggleBtn.textContent = state === 'LAUNCHING' ? t('启动中...') : t('停止中...');
+        toggleBtn.textContent = (state === 'LAUNCHING' ? t('启动中') : t('停止中')) + stepSuffix + '...';
         toggleBtn.className = 'secondary sm';
         toggleBtn.disabled = true;
       } else if (isRunning) {
@@ -1146,10 +1203,22 @@ function formatCooldownRemaining(untilStr) {
   return t('剩余 ') + s + t('秒');
 }
 
+function formatTransitionElapsed(sinceStr) {
+  if (!sinceStr) return '';
+  const sinceMs = new Date(sinceStr).getTime();
+  if (isNaN(sinceMs)) return '';
+  const offset = Number(window.__cpaServerOffsetMs || 0);
+  const sec = Math.max(0, Math.floor((Date.now() - offset - sinceMs) / 1000));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return m + 'm' + String(s).padStart(2, '0') + 's';
+}
+
 function renderAccounts(accounts, cooldowns) {
   const tbody = document.getElementById('accountsBody');
   if (!accounts.length) {
-    tbody.innerHTML = t('<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">暂无已导入账户，请使用上方「本机 Chrome 独立窗口登录」或粘贴 Cookie 导入</td></tr>');
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted); text-align:center; padding:26px;">' + escapeHtml(t('暂无已导入账户，请使用上方「本机 Chrome 独立窗口登录」或粘贴 Cookie 导入')) + '</td></tr>';
     return;
   }
   const cdByAccount = new Map();
@@ -1172,22 +1241,22 @@ function renderAccounts(accounts, cooldowns) {
     if (editingProxyAccountId === acc.id) {
       proxyCell =
         '<div class="proxy-editor">' +
-          '<input type="text" id="proxyInput_' + escapeHtml(acc.id) + '" value="' + escapeHtml(editingProxyDraft) + t('" placeholder="http://127.0.0.1:7890 (留空直连)" style="width:195px; padding:5px 9px; font-size:12px;" />') +
-          '<button class="success sm" data-action="save-proxy" data-id="' + escapeHtml(acc.id) + t('">保存</button>') +
-          '<button class="secondary sm" data-action="clear-proxy" data-id="' + escapeHtml(acc.id) + t('">直连</button>') +
-          t('<button class="secondary sm" data-action="cancel-proxy">取消</button>') +
+          '<input type="text" id="proxyInput_' + escapeHtml(acc.id) + '" value="' + escapeHtml(editingProxyDraft) + '" placeholder="' + escapeHtml(t('http://127.0.0.1:7890 (留空直连)')) + '" style="width:195px; padding:5px 9px; font-size:12px;" />' +
+          '<button class="success sm" data-action="save-proxy" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('保存')) + '</button>' +
+          '<button class="secondary sm" data-action="clear-proxy" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('直连')) + '</button>' +
+          '<button class="secondary sm" data-action="cancel-proxy">' + escapeHtml(t('取消')) + '</button>' +
         '</div>';
     } else {
       const proxyLabel = acc.proxy
         ? '<span style="color:#93c5fd; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;">' + escapeHtml(acc.proxy) + '</span>'
-        : t('<span style="color:var(--muted);">全局 / 直连</span>');
+        : '<span style="color:var(--muted);">' + escapeHtml(t('全局 / 直连')) + '</span>';
       const egressHint = acc.egress && acc.egress !== acc.proxy
-        ? t('<div style="font-size:11px; color:var(--muted);">出口: ') + escapeHtml(acc.egress) + '</div>'
+        ? '<div style="font-size:11px; color:var(--muted);">' + escapeHtml(t('出口: ')) + escapeHtml(acc.egress) + '</div>'
         : '';
       proxyCell =
         '<div style="display:flex; align-items:center; justify-content:space-between; gap:10px; min-width:160px;">' +
           '<div>' + proxyLabel + egressHint + '</div>' +
-          '<button class="secondary sm" data-action="edit-proxy" data-id="' + escapeHtml(acc.id) + '" data-proxy="' + escapeHtml(acc.proxy || '') + t('">设置代理</button>') +
+          '<button class="secondary sm" data-action="edit-proxy" data-id="' + escapeHtml(acc.id) + '" data-proxy="' + escapeHtml(acc.proxy || '') + '">' + escapeHtml(t('设置代理')) + '</button>' +
         '</div>';
     }
 
@@ -1203,31 +1272,32 @@ function renderAccounts(accounts, cooldowns) {
             '<strong style="color:#fbbf24;">' + escapeHtml(title) + '</strong>' +
             '<span class="badge warning" data-until="' + escapeHtml(c.until) + '" style="font-size:10px; padding:1px 7px;">' + escapeHtml(remText) + '</span>' +
           '</div>' +
-          t('<div class="cooldown-pill-time">结束: ') + escapeHtml(endText) + '</div>' +
+          '<div class="cooldown-pill-time">' + escapeHtml(t('结束: ')) + escapeHtml(endText) + '</div>' +
           (c.reason ? '<div class="cooldown-pill-reason">' + escapeHtml(c.reason) + '</div>' : '') +
         '</div>'
       );
     }
-    const rawMsg = acc.message || acc.cooldown_reason || acc.auth_error || acc.catalog_error || '';
-    const hasLockConflict = [rawMsg, ...accCooldowns.map(c => c.reason || '')].some(
+    const rawMsg = acc.message || acc.cooldown_reason || acc.auth_error || '';
+    const catalogErr = acc.catalog_error || '';
+    const hasLockConflict = [rawMsg, catalogErr, ...accCooldowns.map(c => c.reason || '')].some(
       m => m && (m.includes('另一个 AIStudio2API runtime') || m.includes('其他进程占用') || m.includes('账户正在使用'))
     );
     if (hasLockConflict) {
       detailParts.unshift(
         '<div class="cooldown-pill-box" style="border-color:var(--danger-border); background:var(--danger-bg);">' +
-          t('<div class="cooldown-pill-top"><strong style="color:#fca5a5;">进程锁冲突 (多端共用)</strong></div>') +
-          t('<div class="cooldown-pill-reason" style="color:#fecaca;">该账户正被独立版 AIStudio2API.app 或其他实例占用，请关闭另一端或避免共用同一账户。</div>') +
+          '<div class="cooldown-pill-top"><strong style="color:#fca5a5;">' + escapeHtml(t('进程锁冲突 (多端共用)')) + '</strong></div>' +
+          '<div class="cooldown-pill-reason" style="color:#fecaca;">' + escapeHtml(t('该账户正被独立版 AIStudio2API.app 或其他实例占用，请关闭另一端或避免共用同一账户。')) + '</div>' +
         '</div>'
       );
     }
     if (acc.state === 'restricted' && rawMsg) {
       const urlMatch = rawMsg.match(/https:\/\/[^\s)]+/);
       const linkHtml = urlMatch
-        ? '<div style="margin-top:4px;"><a href="' + escapeHtml(urlMatch[0]) + t('" target="_blank" rel="noopener noreferrer" style="color:#93c5fd; font-size:11px; text-decoration:underline;">打开官网页面查看 / 验证 &rarr;</a></div>')
+        ? '<div style="margin-top:4px;"><a href="' + escapeHtml(urlMatch[0]) + '" target="_blank" rel="noopener noreferrer" style="color:#93c5fd; font-size:11px; text-decoration:underline;">' + t('打开官网页面查看 / 验证 &rarr;') + '</a></div>'
         : '';
       detailParts.unshift(
         '<div class="cooldown-pill-box" style="border-color:var(--danger-border); background:var(--danger-bg);">' +
-          t('<div class="cooldown-pill-top"><strong style="color:#fca5a5;">服务受限</strong></div>') +
+          '<div class="cooldown-pill-top"><strong style="color:#fca5a5;">' + escapeHtml(t('服务受限')) + '</strong></div>' +
           '<div class="cooldown-pill-reason" style="color:#fecaca;">' + escapeHtml(rawMsg) + '</div>' +
           linkHtml +
         '</div>'
@@ -1235,19 +1305,41 @@ function renderAccounts(accounts, cooldowns) {
     } else if (rawMsg && !accCooldowns.some(c => c.reason === rawMsg)) {
       detailParts.push('<div style="color:var(--muted); font-size:12px; max-width:260px;">' + escapeHtml(rawMsg) + '</div>');
     }
-    const detailHtml = detailParts.length ? detailParts.join('') : t('<span style="color:var(--muted);">正常就绪</span>');
+    if (catalogErr && !rawMsg) {
+      const isWarningOnly = Array.isArray(acc.models) && acc.models.length > 0;
+      detailParts.push(
+        '<div class="cooldown-pill-box" style="border-color:' + (isWarningOnly ? 'rgba(245,158,11,0.35)' : 'var(--danger-border)') + '; background:' + (isWarningOnly ? 'rgba(245,158,11,0.1)' : 'var(--danger-bg)') + ';">' +
+          '<div class="cooldown-pill-top"><strong style="color:' + (isWarningOnly ? '#fcd34d' : '#fca5a5') + ';">' + escapeHtml(isWarningOnly ? t('目录同步提示') : t('目录同步失败')) + '</strong></div>' +
+          '<div class="cooldown-pill-reason" style="color:' + (isWarningOnly ? '#fde68a' : '#fecaca') + ';">' + escapeHtml(catalogErr) + '</div>' +
+        '</div>'
+      );
+    }
+    const detailHtml = detailParts.length ? detailParts.join('') : '<span style="color:var(--muted);">' + escapeHtml(t('正常就绪')) + '</span>';
 
+    const canRestore = !acc.enabled || acc.state === 'restricted' || acc.state === 'auth_required' || hasCooldown;
+    const restoreBtn = canRestore
+      ? '<button class="success sm" data-action="restore-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('恢复就绪')) + '</button>'
+      : '';
     const clearCooldownBtn = hasCooldown
-      ? '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(acc.id) + t('" data-scope="">清除冷却</button>')
+      ? '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(acc.id) + '" data-scope="">' + escapeHtml(t('清除冷却')) + '</button>'
       : '';
 
     const tierText = (acc.benefit_tier || 'FREE').toUpperCase();
     const tierBadgeClass = tierText.includes('PRO') || tierText.includes('PAID') || tierText.includes('ULTRA') ? 'accent' : '';
-    const transitionHint = acc.transition === 'draining'
-      ? t(' <span class="badge warning" style="font-size:10px; padding:1px 6px;">排空中</span>')
-      : (acc.transition === 'syncing' ? t(' <span class="badge accent" style="font-size:10px; padding:1px 6px;">同步中</span>') : '');
+    const accTransitionLabels = { draining: t('排空中'), syncing: t('同步中'), saving: t('保存中'), refreshing: t('刷新中') };
+    const accStepLabels = { waiting: t('等待请求'), catalog: t('读取目录'), verifying: t('核对验证') };
+    let transitionHint = '';
+    if (acc.transition) {
+      const tLabel = accTransitionLabels[acc.transition] || acc.transition;
+      const sLabel = acc.transition_step ? (accStepLabels[acc.transition_step] || acc.transition_step) : '';
+      const stepNum = (acc.transition_index > 0 && acc.transition_total > 0) ? (' ' + acc.transition_index + '/' + acc.transition_total) : '';
+      const elapsed = acc.transition_since ? (' ' + formatTransitionElapsed(acc.transition_since)) : '';
+      const badgeCls = acc.transition === 'draining' ? 'warning' : 'accent';
+      transitionHint = ' <span class="badge ' + badgeCls + '" style="font-size:10px; padding:1px 6px;">' +
+        escapeHtml(tLabel + (sLabel ? '·' + sLabel : '') + stepNum + elapsed) + '</span>';
+    }
     const activeHint = acc.active_requests > 0
-      ? t(' <span class="badge accent" style="font-size:10px; padding:1px 6px;">并发 ') + Number(acc.active_requests) + '</span>'
+      ? ' <span class="badge accent" style="font-size:10px; padding:1px 6px;">' + escapeHtml(t('并发 ')) + Number(acc.active_requests) + '</span>'
       : '';
 
     return '<tr>' +
@@ -1258,11 +1350,12 @@ function renderAccounts(accounts, cooldowns) {
       '<td>' + proxyCell + '</td>' +
       '<td>' + detailHtml + '</td>' +
       '<td><div style="display:flex; gap:6px; flex-wrap:nowrap; align-items:center;">' +
+        restoreBtn +
         clearCooldownBtn +
-        '<button class="sm" data-action="relogin-account" data-id="' + escapeHtml(acc.id) + t('">无痕重登</button>') +
-        '<button class="secondary sm" data-action="refresh-account" data-id="' + escapeHtml(acc.id) + t('">刷新目录</button>') +
-        '<button class="secondary sm" data-action="toggle-account" data-id="' + escapeHtml(acc.id) + '" data-enabled="' + (!acc.enabled) + '">' + (acc.enabled ? t('禁用') : t('启用')) + '</button>' +
-        '<button class="danger sm" data-action="delete-account" data-id="' + escapeHtml(acc.id) + t('">删除</button>') +
+        '<button class="sm" data-action="relogin-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('无痕重登')) + '</button>' +
+        '<button class="secondary sm" data-action="refresh-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('刷新目录')) + '</button>' +
+        '<button class="secondary sm" data-action="toggle-account" data-id="' + escapeHtml(acc.id) + '" data-enabled="' + (!acc.enabled) + '">' + escapeHtml(acc.enabled ? t('禁用') : t('启用')) + '</button>' +
+        '<button class="danger sm" data-action="delete-account" data-id="' + escapeHtml(acc.id) + '">' + escapeHtml(t('删除')) + '</button>' +
       '</div></td>' +
     '</tr>';
   }).join('');
@@ -1277,28 +1370,28 @@ function renderCooldownOverview(cooldowns) {
     return isNaN(t) || t > Date.now() - 1000;
   });
   if (badge) {
-    badge.textContent = active.length ? (active.length + t(' 项冷却中')) : t('0 项冷却');
+    badge.textContent = active.length ? (active.length + t(' 项冷却中')) : ('0' + t(' 项冷却'));
     badge.className = 'badge ' + (active.length ? 'warning' : 'success');
   }
   if (!active.length) {
-    box.innerHTML = t('<div style="padding:14px 16px; border-radius:10px; background:rgba(16,185,129,0.07); border:1px solid rgba(52,211,153,0.18); color:#6ee7b7; font-size:13px;">所有账户与模型均处于正常可用状态，无冷却限制</div>');
+    box.innerHTML = '<div style="padding:14px 16px; border-radius:10px; background:rgba(16,185,129,0.07); border:1px solid rgba(52,211,153,0.18); color:#6ee7b7; font-size:13px;">' + escapeHtml(t('所有账户与模型均处于正常可用状态，无冷却限制')) + '</div>';
     return;
   }
   box.innerHTML = '<div class="table-wrap"><table>' +
     '<thead><tr>' +
-      t('<th>账户邮箱</th>') +
-      t('<th>冷却范围 / 模型</th>') +
-      t('<th>冷却结束时间</th>') +
-      t('<th>剩余恢复倒计时</th>') +
-      t('<th>冷却原因详情</th>') +
-      t('<th>操作</th>') +
+      '<th>' + escapeHtml(t('账户邮箱')) + '</th>' +
+      '<th>' + escapeHtml(t('冷却范围 / 模型')) + '</th>' +
+      '<th>' + escapeHtml(t('冷却结束时间')) + '</th>' +
+      '<th>' + escapeHtml(t('剩余恢复倒计时')) + '</th>' +
+      '<th>' + escapeHtml(t('冷却原因详情')) + '</th>' +
+      '<th>' + escapeHtml(t('操作')) + '</th>' +
     '</tr></thead>' +
     '<tbody>' +
     active.map(c => {
       const endText = formatCooldownEndTime(c.until);
       const remText = formatCooldownRemaining(c.until);
       const scopeBadge = c.scope === '*'
-        ? t('<span class="badge warning">全局冷却 (全部模型)</span>')
+        ? '<span class="badge warning">' + escapeHtml(t('全局冷却 (全部模型)')) + '</span>'
         : '<span class="badge accent">' + escapeHtml(c.model_id) + '</span> <span style="font-size:11px; color:var(--muted);">[' + escapeHtml(c.channel) + ']</span>';
       return '<tr>' +
         '<td><strong style="color:#fff;">' + escapeHtml(c.account_id) + '</strong></td>' +
@@ -1307,7 +1400,7 @@ function renderCooldownOverview(cooldowns) {
         '<td style="white-space:nowrap;"><span class="badge warning" data-until="' + escapeHtml(c.until) + '">' + escapeHtml(remText) + '</span></td>' +
         '<td style="max-width:420px; word-break:break-word; color:var(--text-secondary); font-size:12px; line-height:1.5;">' + escapeHtml(c.reason || '-') + '</td>' +
         '<td style="white-space:nowrap;">' +
-          '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(c.account_id) + '" data-scope="' + escapeHtml(c.scope) + t('">清除此项冷却</button>') +
+          '<button class="warning sm" data-action="clear-cooldown" data-id="' + escapeHtml(c.account_id) + '" data-scope="' + escapeHtml(c.scope) + '">' + escapeHtml(t('清除此项冷却')) + '</button>' +
         '</td>' +
       '</tr>';
     }).join('') +
@@ -1505,7 +1598,7 @@ async function checkAccountExits() {
     if (!box) return;
     if (!exits.length) {
       box.style.display = 'block';
-      box.innerHTML = t('<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px; color:var(--muted);">当前没有可检测的账户出口配置</div>');
+      box.innerHTML = '<div style="padding:10px 14px; border-radius:10px; background:var(--glass-bg-subtle); border:1px solid var(--glass-border); font-size:12px; color:var(--muted);">' + escapeHtml(t('当前没有可检测的账户出口配置')) + '</div>';
       return;
     }
     const ipCounts = new Map();
@@ -1517,14 +1610,14 @@ async function checkAccountExits() {
       }
     }
     const rows = exits.map(e => {
-      const proxyLabel = e.proxy ? escapeHtml(e.proxy) : t('全局 / 直连');
+      const proxyLabel = e.proxy ? escapeHtml(e.proxy) : escapeHtml(t('全局 / 直连'));
       if (e.error) {
         return '<div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06);">' +
           '<span style="font-family:ui-monospace,Menlo,monospace; color:var(--text-secondary);">' + proxyLabel + '</span>' +
-          t('<span style="color:#fca5a5;">检测失败: ') + escapeHtml(e.error) + '</span></div>';
+          '<span style="color:#fca5a5;">' + escapeHtml(t('检测失败: ')) + escapeHtml(e.error) + '</span></div>';
       }
       const count = ipCounts.get(e.ip) || 0;
-      const sharedBadge = count > 1 ? t(' <span class="badge warning" style="font-size:10px; padding:1px 6px;">共用出口 (') + count + t(' 账户)</span>') : '';
+      const sharedBadge = count > 1 ? ' <span class="badge warning" style="font-size:10px; padding:1px 6px;">' + escapeHtml(t('共用出口 (')) + count + escapeHtml(t(' 账户)')) + '</span>' : '';
       return '<div style="display:flex; justify-content:space-between; gap:10px; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.06); flex-wrap:wrap;">' +
         '<span style="font-family:ui-monospace,Menlo,monospace; color:#93c5fd;">' + proxyLabel + '</span>' +
         '<span><strong>' + escapeHtml(e.ip || '-') + '</strong> · ' + escapeHtml(e.country || '-') + ' · ' + escapeHtml(e.timezone || '-') + ' (' + escapeHtml(e.locale || '-') + ')' + sharedBadge + '</span></div>';
@@ -1553,6 +1646,17 @@ async function toggleAccount(id, enabled) {
     loadStatus();
   } catch (e) {
     showToast(t('更新失败: ') + e.message, true);
+  }
+}
+
+async function restoreAccount(id) {
+  try {
+    await apiCall('/v0/management/aistudio2api/accounts/state', 'POST', { account_id: id, state: 'ready' });
+    showToast(t('已将账户 ') + id + t(' 恢复为就绪状态'), false);
+    await loadStatus();
+    loadLogs();
+  } catch (e) {
+    showToast(t('恢复就绪失败: ') + e.message, true);
   }
 }
 
@@ -1606,15 +1710,15 @@ function formatLogTime(isoStr) {
 async function loadLogs() {
   if (!getKey()) {
     const box = document.getElementById('logsBox');
-    if (box) box.innerHTML = t('<div style="color:var(--muted);">请先在右上角填入 CPA 管理密钥后查看实时运行日志</div>');
+    if (box) box.innerHTML = '<div style="color:var(--muted);">' + escapeHtml(t('请先在右上角填入 CPA 管理密钥后查看实时运行日志')) + '</div>';
     return;
   }
   try {
-    const res = await apiCall('/v0/management/aistudio2api/logs');
+    const res = await apiCall('/v0/management/aistudio2api/logs?limit=80');
     const logs = res.logs || [];
     const box = document.getElementById('logsBox');
     if (!logs.length) {
-      box.innerHTML = t('<div style="color:var(--muted);">暂无日志</div>');
+      box.innerHTML = '<div style="color:var(--muted);">' + escapeHtml(t('暂无日志')) + '</div>';
       return;
     }
     box.innerHTML = logs.slice(-80).reverse().map(l => {
@@ -1697,6 +1801,7 @@ document.addEventListener('click', e => {
     case 'relogin-account': reloginAccount(id); break;
     case 'refresh-account': refreshAccount(id); break;
     case 'toggle-account': toggleAccount(id, btn.dataset.enabled === 'true'); break;
+    case 'restore-account': restoreAccount(id); break;
     case 'delete-account': deleteAccount(id); break;
   }
 });
@@ -1705,17 +1810,25 @@ getKey();
 loadStatus();
 loadLogs();
 setInterval(() => {
+  if (document.hidden) return;
   document.querySelectorAll('[data-until]').forEach(el => {
     const u = el.getAttribute('data-until');
     if (u) el.textContent = formatCooldownRemaining(u);
   });
 }, 1000);
 setInterval(() => {
+  if (document.hidden) return;
   if (!editingProxyAccountId) {
     loadStatus();
   }
   loadLogs();
 }, 6000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if (!editingProxyAccountId) loadStatus();
+    loadLogs();
+  }
+});
 </script>
 </body>
 </html>

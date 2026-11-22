@@ -64,7 +64,8 @@ var firefoxHTTP2SettingsOrder = []http2.SettingID{
 // firefoxPseudoHeaderOrder 是 Firefox 请求 HEADERS 帧的伪头顺序
 var firefoxPseudoHeaderOrder = []string{":method", ":path", ":authority", ":scheme"}
 
-// firefoxStreamPriority 返回 Firefox 为请求的 HEADERS 帧写入的优先级：页面文档、用户输入中发起的请求（Priority: u=0）与预载脚本（Priority: u=1）为 41，字体为 31，Priority: u=4, i 的图片为 12，其余页面图片为 11，Priority: u=6 的预取与 sendBeacon 为 1，其余（包括 Priority: u=6 的网站图标）为 21，线上权重各加 1
+// firefoxStreamPriority 返回 Firefox 按请求目的地与 Priority 头为 HEADERS 帧写入的优先级
+// Weight 为帧中的权重字节，实际权重为它加 1
 func firefoxStreamPriority(header fhttp.Header) http2.PriorityParam {
 	priority, destination := header.Get("Priority"), header.Get("Sec-Fetch-Dest")
 	switch {
@@ -218,7 +219,7 @@ type browserRoundTripper struct {
 	// http3 在直连时按 Alt-Svc 把请求切换到 HTTP/3，经代理时为 nil
 	http3 *firefoxHTTP3
 	mu    sync.Mutex
-	// preflights 按 URL 记录 CORS 预检缓存
+	// preflights 按 preflightKey 记录 CORS 预检缓存
 	preflights map[string]preflightGrant
 }
 
@@ -604,7 +605,7 @@ func dialBrowserTLS(dialer proxy.ContextDialer, sessions *firefoxSessionCache, a
 	return connection, nil
 }
 
-// RoundTrip 按缓存先发 CORS 预检再发送请求，context 标为匿名类别的请求经不带凭据的连接发送，请求在收到响应头前失败时清除该 URL 的预检缓存
+// RoundTrip 按缓存先发 CORS 预检再发送请求，context 标为匿名类别的请求经不带凭据的连接发送，请求在收到响应头前失败时清除它的预检缓存
 func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdhttp.Response, error) {
 	err := transport.ensurePreflight(request)
 	var upstream *fhttp.Request
@@ -619,6 +620,7 @@ func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdh
 	}
 	upstream.Host = request.Host
 	upstream.ContentLength = request.ContentLength
+	upstream.GetBody = request.GetBody
 	upstream.Header = make(fhttp.Header, len(request.Header)+2)
 	for name, values := range request.Header {
 		upstream.Header[name] = append([]string(nil), values...)
@@ -628,7 +630,7 @@ func (transport *browserRoundTripper) RoundTrip(request *stdhttp.Request) (*stdh
 	response, err := transport.roundTrip(upstream, requestClassOf(request.Context()).anonymous)
 	if err != nil {
 		transport.mu.Lock()
-		delete(transport.preflights, request.URL.String())
+		delete(transport.preflights, preflightKey(request))
 		transport.mu.Unlock()
 		return nil, err
 	}
@@ -731,6 +733,14 @@ func standardHeader(source fhttp.Header) stdhttp.Header {
 	return result
 }
 
+// preflightKey 返回请求的 CORS 预检缓存键：与 Firefox nsPreflightCache 一样按 URL 与是否携带凭据区分
+func preflightKey(request *stdhttp.Request) string {
+	if requestClassOf(request.Context()).anonymous {
+		return "anonymous " + request.URL.String()
+	}
+	return request.URL.String()
+}
+
 // ensurePreflight 为带 Origin 的跨域 cors 请求按 Firefox 的流程先发 CORS 预检：经 HTTP/2 时先在后台为实际请求的类别预先拨出连接，预检走匿名连接，预检响应允许的方法与请求头按 Access-Control-Max-Age（上限 24 小时）逐个缓存；no-cors 请求与只带安全头的 GET、HEAD、POST 不预检
 func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) error {
 	origin, err := url.Parse(request.Header.Get("Origin"))
@@ -742,8 +752,9 @@ func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) 
 		return nil
 	}
 	target := request.URL.String()
+	key := preflightKey(request)
 	transport.mu.Lock()
-	cached := transport.preflights[target].allows(request.Method, unsafe, time.Now())
+	cached := transport.preflights[key].allows(request.Method, unsafe, time.Now())
 	transport.mu.Unlock()
 	if cached {
 		return nil
@@ -786,10 +797,10 @@ func (transport *browserRoundTripper) ensurePreflight(request *stdhttp.Request) 
 	}
 	expiry := time.Now().Add(maxAge)
 	transport.mu.Lock()
-	grant := transport.preflights[target]
+	grant := transport.preflights[key]
 	if grant.headers == nil {
 		grant = preflightGrant{methods: map[string]time.Time{}, headers: map[string]time.Time{}}
-		transport.preflights[target] = grant
+		transport.preflights[key] = grant
 	}
 	for _, method := range strings.Split(response.Header.Get("Access-Control-Allow-Methods"), ",") {
 		grant.methods[strings.TrimSpace(method)] = expiry
@@ -869,7 +880,8 @@ func orderedHeaderNames(headers fhttp.Header, host string) []string {
 	return append(slices.Clone(order), remaining...)
 }
 
-// firefox158ClientHello 返回以 tls-client 的 Firefox 148 档案为底、密码套件与支持的组按 Firefox 158 排列、GREASE ECH 按 NSS 选套件与长度的 ClientHello；psk 为 pre_shared_key 扩展长度，非 0 时与 Firefox 的 TLS 1.3 会话恢复一样去掉 session_ticket、末尾加 pre_shared_key
+// firefox158ClientHello 返回 Firefox 158 的 ClientHello，以 tls-client 的 Firefox 148 档案为底
+// psk 为 pre_shared_key 扩展长度，非 0 时去掉 session_ticket、末尾加 pre_shared_key
 func firefox158ClientHello(psk int) tls.ClientHelloID {
 	base := profiles.Firefox_148
 	hello := base.GetClientHelloId()

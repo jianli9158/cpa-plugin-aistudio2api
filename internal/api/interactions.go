@@ -28,7 +28,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		err = errors.New("store=false is incompatible with background=true")
 	}
 	if err == nil && request.WebhookConfig != nil {
-		err = request.WebhookConfig.validate(request.Background)
+		err = request.WebhookConfig.validate(r.Context(), request.Background, s.webhookOutboundValidator())
 	}
 	if err != nil {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
@@ -208,7 +208,7 @@ func (s *server) endBackgroundInteraction(ctx context.Context, request interacti
 		s.storeInteraction(request, previous, current, generationResult{}, interactionObject(generate, request.PreviousID, created, stored.Status, nil))
 	}
 	if request.WebhookConfig != nil {
-		sendInteractionWebhook(*request.WebhookConfig, generate.ID, stored.Status, failure.Bytes())
+		s.sendInteractionWebhook(*request.WebhookConfig, generate.ID, stored.Status, failure.Bytes())
 	}
 }
 

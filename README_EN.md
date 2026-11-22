@@ -65,12 +65,12 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases):
-   - macOS Apple Silicon: `aistudio2api_1.2.8_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.8_darwin_amd64.zip`
-   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.8_linux_amd64.zip`
-   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.8_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.8_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.8_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.12_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.12_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.12_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.12_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.12_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.12_windows_arm64.zip`
 2. Extract the dynamic library (`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
@@ -144,6 +144,8 @@ plugins:
 | `first_event_hedge` | `string` | `"auto"` | First-event timeout backup request hedging policy (`auto` adapts to recent latency, or duration like `"6s"`, `off` to disable) |
 | `first_event_hedge_models` | `string` | `"gemini-4-argon"` | Target models for first-event hedging (comma-separated, `*` for all models) |
 | `enable_assistant_models` | `bool` | `false` | Enable high-risk `-build` code-assistant models (disabled by default to protect accounts; test accounts only) |
+| `allowed_mcp_hosts` | `string` | `""` | Administrator-controlled allowlist of trusted MCP server hosts/origins for host-side connections (comma-separated, e.g. `mcp.example.com,*.trusted.example.com`; empty disables host-side MCP connections by default; non-public IPs and unallowlisted redirects are always blocked) |
+| `allowed_webhook_hosts` | `string` | `""` | Administrator-controlled allowlist of trusted hosts/origins for background interaction webhook delivery (comma-separated; empty disables webhook delivery by default; non-public IPs and redirects are always blocked) |
 
 ---
 

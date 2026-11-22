@@ -142,6 +142,12 @@ void mz_gc(mz_context* mz, bool shrink);
 // mz_thread_stack_size 返回当前线程栈的可用字节数
 size_t mz_thread_stack_size(void);
 
+// mz_clear_stencil_cache 清空进程内 XDR 编译缓存并释放内存
+void mz_clear_stencil_cache(void);
+
+// mz_stencil_cache_stats 返回当前进程内 XDR 编译缓存的条目数与字节数
+void mz_stencil_cache_stats(size_t* entries, size_t* bytes);
+
 #ifdef __cplusplus
 }
 #endif

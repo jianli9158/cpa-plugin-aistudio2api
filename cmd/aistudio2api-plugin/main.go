@@ -79,6 +79,11 @@ var (
 	pluginInst *cpa.Plugin
 )
 
+type okEnvelope struct {
+	OK     bool `json:"ok"`
+	Result any  `json:"result,omitempty"`
+}
+
 func getPlugin() *cpa.Plugin {
 	pluginMu.Lock()
 	defer pluginMu.Unlock()
@@ -128,13 +133,7 @@ func cliproxyPluginCall(method *C.char, reqPtr *C.uint8_t, reqLen C.size_t, resp
 		return 0
 	}
 
-	resBytes, err := json.Marshal(result)
-	if err != nil {
-		rawErr, _ := pluginabi.NewErrorEnvelope("marshal_error", err.Error())
-		writeResponse(resp, rawErr)
-		return 0
-	}
-	payload, err := json.Marshal(pluginabi.Envelope{OK: true, Result: json.RawMessage(resBytes)})
+	payload, err := json.Marshal(okEnvelope{OK: true, Result: result})
 	if err != nil {
 		rawErr, _ := pluginabi.NewErrorEnvelope("marshal_error", err.Error())
 		writeResponse(resp, rawErr)
