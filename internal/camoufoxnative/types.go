@@ -1,6 +1,7 @@
 package camoufoxnative
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -119,6 +120,8 @@ type Options struct {
 	ReadyTimeout     time.Duration
 	Log              io.Writer
 	StartupProgress  func(StartupStage)
+	// RefreshCookies 在重建 WAA VM 前刷新即将到期的 DBSC 绑定 Cookie，为空时跳过
+	RefreshCookies func(context.Context) error
 }
 
 // FrontendBundle 表示地址是官网前端主程序，即页面以 base-js 载入的 boq-makersuite 脚本 m=_b 模块

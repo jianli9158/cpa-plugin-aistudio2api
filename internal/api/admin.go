@@ -195,6 +195,7 @@ type AdminAccountCounts struct {
 type AdminAccount struct {
 	ID          string   `json:"id"`
 	Label       string   `json:"label"`
+	Note        string   `json:"note,omitempty"`
 	Enabled     bool     `json:"enabled"`
 	State       string   `json:"state"`
 	Proxy       string   `json:"proxy"`
@@ -223,6 +224,10 @@ type AdminAccount struct {
 	ActiveRequests int `json:"active_requests"`
 	// CatalogError 是已有模型目录的账户最近一次目录同步失败的原因，下一次同步成功后省略
 	CatalogError string `json:"catalog_error,omitempty"`
+	// VerificationRequired 表示账户因上游要求验证而受限，可在验证页完成验证后恢复
+	VerificationRequired bool `json:"verification_required,omitempty"`
+	// DeviceBoundSession 表示账户会话带 __Secure-1PSIDRTS 且缺少本地与远程续签材料，约 2 小时内失效
+	DeviceBoundSession bool `json:"device_bound_session,omitempty"`
 }
 
 // AccountExit 表示一个账户出口代理的公网 IP 与按 IP 定位的国家、时区和语言，Proxy 为空时是直连，查询失败时 Error 为原因
@@ -256,6 +261,7 @@ type AdminAccountRefresh struct {
 // AccountInput 表示已有账户配置
 type AccountInput struct {
 	Label    string `json:"label"`
+	Note     string `json:"note"`
 	Enabled  bool   `json:"enabled"`
 	Proxy    string `json:"proxy"`
 	Locale   string `json:"locale"`
@@ -299,6 +305,10 @@ type CookieBrowser struct {
 
 	// DeviceBound 表示 Cookie 带 __Secure-1PSIDRTS，会话绑定原浏览器所在的设备，导入的副本约 2 小时内失效
 	DeviceBound bool `json:"device_bound"`
+	// SignInRequired 表示该账户已导入且需要重新登录，导入时原地更新它的认证状态
+	SignInRequired bool `json:"sign_in_required"`
+	// BenefitTier 是识别阶段读取到的 AI Studio 权益等级，未读取到时省略
+	BenefitTier string `json:"benefit_tier,omitempty"`
 }
 
 // ChromeImportInput 表示批量导入的 Chrome 账号与账户环境
@@ -329,8 +339,12 @@ type RuntimeConfig struct {
 	GoogleSearch              bool                 `json:"google_search"`
 	FirstEventHedge           string               `json:"first_event_hedge"`
 	FirstEventHedgeModels     string               `json:"first_event_hedge_models"`
+	FirstEventTimeout         string               `json:"first_event_timeout"`
 	ContinuationRewrite       bool                 `json:"continuation_rewrite"`
 	ContinuationPrompt        string               `json:"continuation_prompt"`
+	ReplyTool                 bool                 `json:"reply_tool"`
+	UserMessageRewrite        string               `json:"user_message_rewrite"`
+	ThinkingGuard             bool                 `json:"thinking_guard"`
 	LogFile                   bool                 `json:"log_file"`
 	LogMaxTotalMB             int                  `json:"log_max_total_mb"`
 	AuthStates                string               `json:"auth_states"`
@@ -418,6 +432,7 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/{id}/login", s.handleLoginAccount)
 	mux.HandleFunc("GET /api/login-view/{view}", s.handleLoginView)
 	mux.HandleFunc("POST /api/accounts/{id}/refresh", s.handleRefreshAccount)
+	mux.HandleFunc("POST /api/accounts/refresh", s.handleRefreshAccounts)
 	mux.HandleFunc("POST /api/control/start", s.handleStartService)
 	mux.HandleFunc("POST /api/control/stop", s.handleStopService)
 	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)

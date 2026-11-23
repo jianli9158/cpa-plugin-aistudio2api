@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"slices"
 	"sync"
@@ -126,13 +127,14 @@ func newRuntimeManager(
 	cfg config.Config,
 	overrides dataConfigOverrides,
 ) (*runtimeManager, error) {
-	requests := newRequestRegistry(ctx)
+	requests := newRequestRegistry()
 	manager := &runtimeManager{
 		lifecycle: ctx, configPath: configPath, activeManagement: cfg,
 		overrides: overrides, requests: requests, factory: buildRuntimeGeneration,
 	}
 	generation, err := manager.factory(ctx, ctx, cfg, requests)
 	if err != nil {
+		requests.close()
 		return nil, err
 	}
 	generation.service.SetAPIKeyAccounts(apiKeyAccounts(cfg.ProxyAPIKey, cfg.APIKeyAccounts, cfg))
@@ -333,10 +335,13 @@ func (manager *runtimeManager) stopAutoStart() {
 
 // Close 释放当前生成服务
 func (manager *runtimeManager) Close() error {
+	_, stopErr := manager.StopService(context.Background())
 	manager.mu.RLock()
 	current := manager.current
 	manager.mu.RUnlock()
-	return current.Close()
+	closeErr := current.Close()
+	manager.requests.close()
+	return errors.Join(stopErr, closeErr)
 }
 
 // requestSettings 是只决定新请求行为的设置，保存后下一个请求即采用，进行中的请求沿用开始时的值
@@ -346,14 +351,22 @@ type requestSettings struct {
 	googleSearch       bool
 	mediaOutput        string
 	mediaBaseURL       string
+	replyTool          bool
+	userMessageRewrite string
+	thinkingGuard      bool
 }
 
 // requestSettingsOf 返回 cfg 中只决定新请求行为的设置
 func requestSettingsOf(cfg config.Config) *requestSettings {
 	return &requestSettings{
 		modes:              api.ResponseModes{NonstreamKeepalive: cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream},
-		searchModelAliases: cfg.SearchModelAliases, googleSearch: cfg.GoogleSearch,
-		mediaOutput: cfg.MediaOutput, mediaBaseURL: cfg.MediaBaseURL,
+		searchModelAliases: cfg.SearchModelAliases,
+		googleSearch:       cfg.GoogleSearch,
+		mediaOutput:        cfg.MediaOutput,
+		mediaBaseURL:       cfg.MediaBaseURL,
+		replyTool:          cfg.ReplyTool,
+		userMessageRewrite: cfg.UserMessageRewrite,
+		thinkingGuard:      cfg.ThinkingGuard,
 	}
 }
 
@@ -407,6 +420,13 @@ func (manager *runtimeManager) CountTokens(ctx context.Context, request aistudio
 func (manager *runtimeManager) Generate(ctx context.Context, request aistudio.GenerateRequest) (<-chan aistudio.Event, error) {
 	if accountID := PinnedAccountIDFromContext(ctx); accountID != "" && request.AccountID == "" {
 		request.AccountID = accountID
+	}
+	if settings := manager.settings.Load(); settings != nil {
+		request.ReplyTool = request.ReplyTool || settings.replyTool
+		if request.UserMessageRewrite == "" {
+			request.UserMessageRewrite = settings.userMessageRewrite
+		}
+		request.ThinkingGuard = request.ThinkingGuard || settings.thinkingGuard
 	}
 	current, done := manager.generation()
 	defer done()
@@ -702,8 +722,13 @@ func (manager *runtimeManager) UpdateRuntimeConfig(ctx context.Context, value ap
 	current.service.SetRequestPolicy(mapping, updated.MaxAccountSwitches)
 	manager.settings.Store(&requestSettings{
 		modes:              api.ResponseModes{NonstreamKeepalive: updated.NonstreamKeepalive, FakeStream: updated.FakeStream},
-		searchModelAliases: updated.SearchModelAliases, googleSearch: updated.GoogleSearch,
-		mediaOutput: updated.MediaOutput, mediaBaseURL: updated.MediaBaseURL,
+		searchModelAliases: updated.SearchModelAliases,
+		googleSearch:       updated.GoogleSearch,
+		mediaOutput:        updated.MediaOutput,
+		mediaBaseURL:       updated.MediaBaseURL,
+		replyTool:          updated.ReplyTool,
+		userMessageRewrite: updated.UserMessageRewrite,
+		thinkingGuard:      updated.ThinkingGuard,
 	})
 	updated = manager.decorateRuntimeConfig(updated, current.config)
 	return updated, nil
@@ -786,6 +811,7 @@ func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dat
 		DiscoverHiddenModels:  value.DiscoverHiddenModels,
 		FirstEventHedge:       value.FirstEventHedge,
 		FirstEventHedgeModels: value.FirstEventHedgeModels,
+		FirstEventTimeout:     value.FirstEventTimeout,
 		ContinuationRewrite:   value.ContinuationRewrite,
 		ContinuationPrompt:    value.ContinuationPrompt,
 	}
@@ -795,7 +821,7 @@ func sameDataConfig(value api.RuntimeConfig, active config.Config, overrides dat
 		slices.Equal(saved.UpstreamChannels, active.UpstreamChannels) &&
 		saved.WAABackend == active.WAABackend &&
 		saved.BuildNativeNonstream == active.BuildNativeNonstream &&
-		saved.YouTubeLinks == active.YouTubeLinks && saved.StripThoughtSignatures == active.StripThoughtSignatures && saved.FirstEventHedge == active.FirstEventHedge && saved.FirstEventHedgeModels == active.FirstEventHedgeModels &&
+		saved.YouTubeLinks == active.YouTubeLinks && saved.StripThoughtSignatures == active.StripThoughtSignatures && saved.FirstEventHedge == active.FirstEventHedge && saved.FirstEventHedgeModels == active.FirstEventHedgeModels && saved.FirstEventTimeout == active.FirstEventTimeout &&
 		saved.DiscoverHiddenModels == active.DiscoverHiddenModels &&
 		saved.ContinuationRewrite == active.ContinuationRewrite && saved.ContinuationPrompt == active.ContinuationPrompt
 }

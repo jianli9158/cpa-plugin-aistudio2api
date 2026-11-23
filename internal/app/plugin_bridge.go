@@ -127,6 +127,14 @@ func (service *trackedService) SetFirstEventHedge(firstEventHedge, firstEventHed
 	service.hedgeModels = config.ModelList(firstEventHedgeModels)
 }
 
+// SetFirstEventTimeout updates first-event timeout on trackedService.
+func (service *trackedService) SetFirstEventTimeout(firstEventTimeout string) {
+	if service == nil {
+		return
+	}
+	service.firstEventTimeout, _ = config.ParseFirstEventTimeout(firstEventTimeout)
+}
+
 // HedgeSettings returns the active first-event hedge settings on the underlying trackedService.
 func (rt *PluginRuntime) HedgeSettings() (bool, time.Duration, []string) {
 	if rt == nil || rt.Manager == nil {
@@ -220,6 +228,7 @@ func (rt *PluginRuntime) ApplyLiveConfig(cfg config.Config) {
 	)
 	if ts, ok := cur.service.(*trackedService); ok && ts != nil {
 		ts.SetFirstEventHedge(cfg.FirstEventHedge, cfg.FirstEventHedgeModels)
+		ts.SetFirstEventTimeout(cfg.FirstEventTimeout)
 		ts.buildNativeNonstream = cfg.BuildNativeNonstream
 		ts.discoverHiddenModels = cfg.DiscoverHiddenModels
 		mapping, _ := config.ParseModelMapping(cfg.ModelMapping)

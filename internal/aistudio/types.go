@@ -452,6 +452,12 @@ type GenerateRequest struct {
 	KeepAbnormalFinish bool `json:"-"`
 	// MaxRegenerations 覆盖本次请求异常结束、流中断或流尾 5xx 时的重新生成次数上限，nil 时使用默认上限
 	MaxRegenerations *int `json:"-"`
+	// ReplyTool 表示经内部 final 函数交付正文以减轻角色扮演场景的流式截断
+	ReplyTool bool `json:"-"`
+	// UserMessageRewrite 表示发往上游前改写用户消息的模式（off、traditional、martian），开启时要求模型默认以简体中文回复
+	UserMessageRewrite string `json:"-"`
+	// ThinkingGuard 表示引导思考阶段保持简洁抽象不复述敏感词并将思考上限收敛到低档，以减轻思考阶段触发上游过滤截断
+	ThinkingGuard bool `json:"-"`
 	// continuationRound 为自动续写的轮次，首轮为 0
 	continuationRound int
 	// continuationToken 为上一轮响应给出的续写 token

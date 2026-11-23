@@ -382,6 +382,31 @@ func (p *Plugin) registrationPayload() rpcRegistration {
 					Default:     "",
 					Description: "英文逗号分隔的受信任后台交互 Webhook 主机/源白名单（默认留空禁用 Webhook 出站投递；始终禁止重定向与非公网 IP）",
 				},
+				{
+					Name:        "first_event_timeout",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "off",
+					Description: "单次尝试等待上游首个事件的超时时间（off 表示不限制，或填写正整数秒，如 30；超时后自动换号重试）",
+				},
+				{
+					Name:        "reply_tool",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Default:     false,
+					Description: "For SillyTavern：启用内部 final 回复工具交付正文，减轻长对话/角色扮演流式截断",
+				},
+				{
+					Name:        "user_message_rewrite",
+					Type:        pluginapi.ConfigFieldTypeEnum,
+					Default:     "off",
+					EnumValues:  []string{"off", "traditional", "martian"},
+					Description: "For SillyTavern：发送前改写用户消息文字（off 关闭 / traditional 简转繁 / martian 火星文），并要求模型默认以简体中文回复",
+				},
+				{
+					Name:        "thinking_guard",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Default:     false,
+					Description: "For SillyTavern：引导思考阶段保持简洁抽象不复述敏感词并将思考上限收敛到低档，减轻思考阶段触发过滤截断",
+				},
 			},
 		},
 		Capabilities: rpcCapabilities{

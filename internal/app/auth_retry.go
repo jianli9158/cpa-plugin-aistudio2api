@@ -435,7 +435,7 @@ func authenticationFailed(response *aistudio.RPCResponse) bool {
 func readAuthenticationFailure(method string, response *aistudio.RPCResponse) (*aistudio.RPCError, error) {
 	body, readErr := io.ReadAll(response.Body)
 	if err := errors.Join(readErr, response.Body.Close()); err != nil {
-		return nil, fmt.Errorf("读取认证失败响应: %w", err)
+		return nil, &aistudio.ResponseReadError{Err: fmt.Errorf("读取认证失败响应: %w", err)}
 	}
 	return aistudio.DecodeRPCError(method, response.StatusCode, body), nil
 }

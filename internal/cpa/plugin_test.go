@@ -1505,3 +1505,41 @@ func TestExecutorResponsesMCPSSRFBlockedEndToEnd(t *testing.T) {
 		t.Fatalf("expected 0 outbound hits after reload, got %d", hits.Load())
 	}
 }
+
+func TestPluginConfigSillyTavernAndFirstEventTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	raw := []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\nfirst_event_timeout: \"45\"\nreply_tool: true\nuser_message_rewrite: martian\nthinking_guard: true\n")
+	_, cfg, err := cpa.ParsePluginConfig(raw)
+	if err != nil {
+		t.Fatalf("ParsePluginConfig failed: %v", err)
+	}
+	if cfg.FirstEventTimeout != "45" || !cfg.ReplyTool || cfg.UserMessageRewrite != "martian" || !cfg.ThinkingGuard {
+		t.Fatalf("unexpected parsed config: timeout=%q reply=%v rewrite=%q guard=%v", cfg.FirstEventTimeout, cfg.ReplyTool, cfg.UserMessageRewrite, cfg.ThinkingGuard)
+	}
+
+	p := cpa.NewPlugin(nil)
+	t.Cleanup(func() { _, _ = p.HandleMethod(pluginabi.MethodPluginShutdown, nil) })
+	regReq, _ := json.Marshal(map[string]any{"config_yaml": raw, "schema_version": pluginabi.SchemaVersion})
+	regRes, err := p.HandleMethod(pluginabi.MethodPluginRegister, regReq)
+	if err != nil {
+		t.Fatalf("plugin.register failed: %v", err)
+	}
+	rawReg, _ := json.Marshal(regRes)
+	var parsedReg struct {
+		Metadata pluginapi.Metadata `json:"metadata"`
+	}
+	if err := json.Unmarshal(rawReg, &parsedReg); err != nil {
+		t.Fatalf("decode registration: %v", err)
+	}
+	names := make(map[string]bool, len(parsedReg.Metadata.ConfigFields))
+	for _, f := range parsedReg.Metadata.ConfigFields {
+		names[f.Name] = true
+	}
+	for _, required := range []string{"first_event_timeout", "reply_tool", "user_message_rewrite", "thinking_guard"} {
+		if !names[required] {
+			t.Fatalf("expected ConfigField %q in plugin registration", required)
+		}
+	}
+}

@@ -32,17 +32,22 @@ type AccountTaskItem struct {
 	Error string `json:"error,omitempty"`
 }
 
-// 账户任务中一个账户的步骤：等待在浏览器中登录、读取浏览器里的登录状态、检查 AI Studio 访问、保存账户
+// 账户任务中一个账户的步骤：等待在浏览器中登录、读取浏览器里的登录状态、检查 AI Studio 访问、保存账户、核对验证状态、等待在验证页完成验证
 const (
-	TaskStepLogin    = "login"
-	TaskStepReading  = "reading"
-	TaskStepChecking = "checking"
-	TaskStepSaving   = "saving"
+	TaskStepLogin     = "login"
+	TaskStepReading   = "reading"
+	TaskStepChecking  = "checking"
+	TaskStepSaving    = "saving"
+	TaskStepVerifying = "verifying"
+	TaskStepVerify    = "verify"
 )
 
 type taskStepContextKey struct{}
 
 type taskLabelContextKey struct{}
+
+// taskLabelReportContextKey 是 context 中账户任务更新账户标签回调的键
+type taskLabelReportContextKey struct{}
 
 // TaskLabel 返回 ctx 所属账户任务正在处理的账户标签，ctx 不属于账户任务时为空串
 func TaskLabel(ctx context.Context) string {
@@ -54,6 +59,13 @@ func TaskLabel(ctx context.Context) string {
 func ReportTaskStep(ctx context.Context, step string) {
 	if report, ok := ctx.Value(taskStepContextKey{}).(func(string)); ok {
 		report(step)
+	}
+}
+
+// ReportTaskLabel 把已知的账户邮箱写入进行中的账户任务，ctx 不属于账户任务时不做任何事
+func ReportTaskLabel(ctx context.Context, label string) {
+	if report, ok := ctx.Value(taskLabelReportContextKey{}).(func(string)); ok {
+		report(label)
 	}
 }
 
@@ -213,6 +225,12 @@ func runAccountTaskItems(ctx context.Context, update accountTaskUpdate, count in
 				label = task.Items[index].Label
 			})
 			itemCtx := context.WithValue(ctx, taskLabelContextKey{}, label)
+			itemCtx = context.WithValue(itemCtx, taskLabelReportContextKey{}, func(nextLabel string) {
+				if nextLabel == "" {
+					return
+				}
+				update(func(task *AccountTask) { task.Items[index].Label = nextLabel })
+			})
 			account, err := run(context.WithValue(itemCtx, taskStepContextKey{}, func(step string) {
 				update(func(task *AccountTask) { task.Items[index].Step = step })
 			}), index)
@@ -294,6 +312,50 @@ func (s *server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 		runAccountTaskItems(ctx, update, 1, func(ctx context.Context, _ int) (AdminAccount, error) {
 			return s.config.Admin.LoginAccount(ctx, id, view)
 		})
+	})
+}
+
+// refreshTaskConcurrency 是刷新任务同时刷新的账户数
+const refreshTaskConcurrency = 4
+
+// handleRefreshAccounts 在账户任务中按 refreshTaskConcurrency 的并发依次刷新所列账户，账户标签为账户 ID，任务被关闭后不再开始刷新
+func (s *server) handleRefreshAccounts(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	task := AccountTask{Kind: "refresh", Items: make([]AccountTaskItem, len(input.IDs))}
+	next := make(chan int, len(input.IDs))
+	for index, id := range input.IDs {
+		task.Items[index] = AccountTaskItem{Label: id, State: "pending"}
+		next <- index
+	}
+	close(next)
+	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
+		var group sync.WaitGroup
+		for range min(refreshTaskConcurrency, len(input.IDs)) {
+			group.Go(func() {
+				for index := range next {
+					if ctx.Err() != nil {
+						return
+					}
+					update(func(task *AccountTask) { task.Items[index].State = "running" })
+					_, err := s.config.Admin.RefreshAccount(ctx, input.IDs[index])
+					update(func(task *AccountTask) {
+						item := &task.Items[index]
+						if err != nil {
+							item.State, item.Code, item.Error = "failed", codeFromError(err, ""), err.Error()
+							return
+						}
+						item.State = "done"
+					})
+				}
+			})
+		}
+		group.Wait()
 	})
 }
 

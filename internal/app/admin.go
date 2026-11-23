@@ -249,7 +249,7 @@ func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountC
 	target, done := admin.accountCommit()
 	var account *aistudio.Account
 	if _, exists := target.accountIDs()[strings.ToLower(strings.TrimSpace(result.Email))]; exists {
-		account, err = target.updateImportedAccount(ctx, result.Email, 0, result.StorageState, directory)
+		account, err = target.updateImportedAccount(ctx, result.Email, 0, accountConfig.Note, result.StorageState, directory)
 	} else {
 		account, err = target.addAccount(accountConfig, result.StorageState, directory)
 	}
@@ -291,28 +291,34 @@ func (admin *runtimeAdmin) DiscoverCookieAccounts(ctx context.Context, input api
 		admin.requests.log("auth", "ERROR", "识别 Cookie 中的账户失败", "error", err)
 		return nil, invalidAccount(err)
 	}
-	return cookieAccountEntries(api.CookieBrowser{DeviceBound: deviceBoundSession(state)}, accounts, admin.accountIDs()), nil
+	return cookieAccountEntries(api.CookieBrowser{DeviceBound: deviceBoundSession(state)}, accounts, admin.pool.Status()), nil
 }
 
 // deviceBoundSession 表示 Cookie 带 __Secure-1PSIDRTS，会话绑定签发它的设备
 func deviceBoundSession(state aistudio.StorageState) bool {
-	_, bound := state.CookieValue("__Secure-1PSIDRTS", "https://aistudio.google.com", time.Now())
-	return bound
+	return state.HasBoundCookie()
 }
 
-// cookieAccountEntries 以 template 为模板为每个会话账户生成一项并标记已导入与服务受限的账户，没有账户时只返回 template
-func cookieAccountEntries(template api.CookieBrowser, accounts []chromeauth.CookieAccount, existing map[string]string) []api.CookieBrowser {
+// cookieAccountEntries 以 template 为模板为每个会话账户生成一项，按账户池状态 statuses 标记已导入、需要重新登录与服务受限的账户，没有账户时只返回 template
+func cookieAccountEntries(template api.CookieBrowser, accounts []chromeauth.CookieAccount, statuses []aistudio.AccountStatus) []api.CookieBrowser {
 	if len(accounts) == 0 {
 		return []api.CookieBrowser{template}
+	}
+	existing := make(map[string]aistudio.AccountStatus, len(statuses))
+	for _, status := range statuses {
+		existing[strings.ToLower(strings.TrimSpace(status.ID))] = status
 	}
 	entries := make([]api.CookieBrowser, len(accounts))
 	for index, account := range accounts {
 		entry := template
-		entry.Email, entry.AuthUser, entry.Restricted = account.Email, account.AuthUser, account.Restricted
-		if restricted, imported := existing[account.Email]; imported {
-			entry.Imported = true
-			if restricted != "" {
-				entry.Restricted = restricted
+		entry.Email, entry.AuthUser, entry.Restricted, entry.BenefitTier = account.Email, account.AuthUser, account.Restricted, account.BenefitTier
+		if status, imported := existing[account.Email]; imported {
+			entry.Imported, entry.SignInRequired = true, status.State == aistudio.AccountAuthRequired
+			if entry.BenefitTier == "" && status.BenefitTier != "" && status.BenefitTier != "Unknown" {
+				entry.BenefitTier = status.BenefitTier
+			}
+			if status.State == aistudio.AccountRestricted && status.Message != "" {
+				entry.Restricted = status.Message
 			}
 		}
 		entries[index] = entry
@@ -375,6 +381,7 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 		label = strings.ToLower(verification.Email)
 	}
 	accountConfig := aistudio.DefaultAccountConfig(label)
+	accountConfig.Note = aistudio.TruncateAccountNote(input.Note)
 	accountConfig.AuthUser = input.AuthUser
 	accountConfig.Proxy = strings.TrimSpace(input.Proxy)
 	exit := environment()
@@ -397,7 +404,7 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	target, done := admin.accountCommit()
 	for _, status := range target.pool.Status() {
 		if strings.EqualFold(status.ID, strings.TrimSpace(email)) {
-			account, err := target.updateImportedAccount(ctx, status.ID, accountConfig.AuthUser, input.StorageState, "")
+			account, err := target.updateImportedAccount(ctx, status.ID, accountConfig.AuthUser, accountConfig.Note, input.StorageState, "")
 			done()
 			if err != nil {
 				return api.AdminAccount{}, err
@@ -561,6 +568,7 @@ func (admin *runtimeAdmin) saveAccountConfig(ctx context.Context, accountID stri
 		return api.AdminAccount{}, nil, invalidAccount(fmt.Errorf("账户邮箱不可修改"))
 	}
 	accountConfig := aistudio.DefaultAccountConfig(strings.ToLower(strings.TrimSpace(accountID)))
+	accountConfig.Note = strings.TrimSpace(input.Note)
 	accountConfig.Enabled = input.Enabled
 	accountConfig.Proxy = strings.TrimSpace(input.Proxy)
 	accountConfig.Locale = strings.TrimSpace(input.Locale)
@@ -576,9 +584,21 @@ func (admin *runtimeAdmin) saveAccountConfig(ctx context.Context, accountID stri
 	if err != nil {
 		return api.AdminAccount{}, nil, err
 	}
-	if current.Enabled != accountConfig.Enabled && current.Proxy == accountConfig.Proxy &&
-		current.Locale == accountConfig.Locale && current.Timezone == accountConfig.Timezone {
-		updated, err := admin.setAccountEnabled(accountID, accountConfig.Enabled)
+	if current.Proxy == accountConfig.Proxy && current.Locale == accountConfig.Locale && current.Timezone == accountConfig.Timezone {
+		if current.Note != accountConfig.Note {
+			if _, err := admin.pool.SetNote(accountID, accountConfig.Note); err != nil {
+				return api.AdminAccount{}, nil, accountOperationError(err)
+			}
+		}
+		if current.Enabled != accountConfig.Enabled {
+			updated, err := admin.setAccountEnabled(accountID, accountConfig.Enabled)
+			return updated, nil, err
+		}
+		if current.Note != accountConfig.Note {
+			admin.requests.log("auth", "INFO", "账户配置已更新", "account", accountConfig.Label)
+			admin.publishRuntimeSnapshot(admin.lifecycle)
+		}
+		updated, err := admin.account(accountID)
 		return updated, nil, err
 	}
 	lease, err := admin.acquireAccount(ctx, accountID)
@@ -843,11 +863,12 @@ func (admin *runtimeAdmin) saveLogin(ctx context.Context, accountID string, stat
 	return account, nil
 }
 
-// updateImportedAccount 在已存在的账户上替换认证状态与可选指纹，重建 Worker 并返回账户
+// updateImportedAccount 在已存在的账户上替换认证状态与可选指纹，重建 Worker 并返回账户，仅在账户备注为空时补填 defaultNote
 func (admin *runtimeAdmin) updateImportedAccount(
 	ctx context.Context,
 	accountID string,
 	authUser int,
+	defaultNote string,
 	state aistudio.StorageState,
 	fingerprintDirectory string,
 ) (*aistudio.Account, error) {
@@ -862,7 +883,7 @@ func (admin *runtimeAdmin) updateImportedAccount(
 	if err := replaceAccountState(lease, state, fingerprintDirectory); err != nil {
 		return nil, errors.Join(err, lease.Release())
 	}
-	if err := setCookieAuthUser(lease, authUser, admin.workers.prepareUpdate); err != nil {
+	if err := setImportedAccountConfig(lease, authUser, defaultNote, admin.workers.prepareUpdate); err != nil {
 		return nil, errors.Join(err, lease.Release())
 	}
 	if err := admin.service.changeModels(func() error {
@@ -874,6 +895,34 @@ func (admin *runtimeAdmin) updateImportedAccount(
 		return nil, err
 	}
 	return account, nil
+}
+
+// setImportedAccountConfig 在重新导入时同步会话序号，并在原备注为空时填入 defaultNote
+func setImportedAccountConfig(lease *aistudio.AccountLease, authUser int, defaultNote string, prepare func(*aistudio.Account, aistudio.AccountConfig) (*accountWorkerUpdate, error)) error {
+	account := lease.Account()
+	fillNote := strings.TrimSpace(account.Config.Note) == "" && strings.TrimSpace(defaultNote) != ""
+	if account.Config.AuthUser == authUser && !fillNote {
+		return nil
+	}
+	accountConfig := account.Config
+	authUserChanged := accountConfig.AuthUser != authUser
+	accountConfig.AuthUser = authUser
+	if fillNote {
+		accountConfig.Note = aistudio.TruncateAccountNote(defaultNote)
+	}
+	if !authUserChanged {
+		return lease.SaveConfig(accountConfig)
+	}
+	workerUpdate, err := prepare(account, accountConfig)
+	if err != nil {
+		return err
+	}
+	if err := lease.SaveConfig(accountConfig); err != nil {
+		workerUpdate.Discard()
+		return err
+	}
+	workerUpdate.Commit()
+	return nil
 }
 
 // replaceAccountState 以新登录状态替换账户的认证状态，fingerprintDirectory 非空时一并替换 Camoufox 指纹
@@ -1112,12 +1161,14 @@ func (admin *runtimeAdmin) loginRequest(account *aistudio.Account, directory str
 
 func adminAccountDTO(status aistudio.AccountStatus) api.AdminAccount {
 	account := api.AdminAccount{
-		ID: status.ID, Label: status.Label, Enabled: status.Enabled, State: string(status.State),
+		ID: status.ID, Label: status.Label, Note: status.Note, Enabled: status.Enabled, State: string(status.State),
 		Proxy: status.Proxy, Egress: status.Egress, Locale: status.Locale, Timezone: status.Timezone,
 		Models: status.Models, BenefitTier: status.BenefitTier, Message: status.Message,
 		PairingRenewedAt: pairingRenewedAt(status.Directory),
 		Transition:       string(status.Transition), ActiveRequests: status.ActiveRequests, CatalogError: status.CatalogError,
-		TransitionStep: string(status.TransitionStep), TransitionIndex: status.TransitionIndex, TransitionTotal: status.TransitionTotal,
+		TransitionStep:       string(status.TransitionStep), TransitionIndex: status.TransitionIndex, TransitionTotal: status.TransitionTotal,
+		VerificationRequired: status.VerificationRequired,
+		DeviceBoundSession:   status.DeviceBoundSession && !hasPairingRenewal(status.Directory),
 	}
 	if status.Transition != "" {
 		account.TransitionSince = &status.TransitionSince
@@ -1197,7 +1248,8 @@ func (admin *runtimeAdmin) UpdateRuntimeConfig(_ context.Context, value api.Runt
 		StripThoughtSignatures: value.StripThoughtSignatures,
 		SearchModelAliases:     value.SearchModelAliases, DiscoverHiddenModels: value.DiscoverHiddenModels, GoogleSearch: value.GoogleSearch,
 		ContinuationRewrite: value.ContinuationRewrite, ContinuationPrompt: strings.TrimSpace(value.ContinuationPrompt),
-		FirstEventHedge: strings.ToLower(strings.TrimSpace(value.FirstEventHedge)), FirstEventHedgeModels: strings.TrimSpace(value.FirstEventHedgeModels), AuthStates: value.AuthStates, ListenAddr: value.ListenAddr, PreviewListenAddr: value.PreviewListenAddr,
+		ReplyTool: value.ReplyTool, UserMessageRewrite: strings.ToLower(strings.TrimSpace(value.UserMessageRewrite)), ThinkingGuard: value.ThinkingGuard,
+		FirstEventHedge: strings.ToLower(strings.TrimSpace(value.FirstEventHedge)), FirstEventHedgeModels: strings.TrimSpace(value.FirstEventHedgeModels), FirstEventTimeout: strings.ToLower(strings.TrimSpace(value.FirstEventTimeout)), AuthStates: value.AuthStates, ListenAddr: value.ListenAddr, PreviewListenAddr: value.PreviewListenAddr,
 		ProxyAPIKey: value.APIKey, Proxy: value.Proxy, InitTimeout: initTimeout, RequestTimeout: requestTimeout,
 		WarmWorkerLimit: value.WarmWorkerLimit, MaxActiveWorkers: value.MaxActiveWorkers,
 		WarmStartupConcurrency: value.WarmStartupConcurrency,
@@ -1554,7 +1606,8 @@ func runtimeConfigDTO(cfg config.Config) api.RuntimeConfig {
 		StripThoughtSignatures: cfg.StripThoughtSignatures,
 		SearchModelAliases:     cfg.SearchModelAliases, DiscoverHiddenModels: cfg.DiscoverHiddenModels, GoogleSearch: cfg.GoogleSearch,
 		ContinuationRewrite: cfg.ContinuationRewrite, ContinuationPrompt: cfg.ContinuationPrompt,
-		FirstEventHedge: cfg.FirstEventHedge, FirstEventHedgeModels: cfg.FirstEventHedgeModels, AuthStates: cfg.AuthStates, ListenAddr: cfg.ListenAddr, APIKey: cfg.ProxyAPIKey,
+		ReplyTool: cfg.ReplyTool, UserMessageRewrite: cfg.UserMessageRewrite, ThinkingGuard: cfg.ThinkingGuard,
+		FirstEventHedge: cfg.FirstEventHedge, FirstEventHedgeModels: cfg.FirstEventHedgeModels, FirstEventTimeout: cfg.FirstEventTimeout, AuthStates: cfg.AuthStates, ListenAddr: cfg.ListenAddr, APIKey: cfg.ProxyAPIKey,
 		ActiveListenAddr: cfg.ListenAddr, ActiveAPIKey: cfg.ProxyAPIKey,
 		PreviewListenAddr: cfg.PreviewListenAddr, ActivePreviewListenAddr: cfg.PreviewListenAddr,
 		Proxy: cfg.Proxy, InitTimeout: cfg.InitTimeout.String(), RequestTimeout: cfg.RequestTimeout.String(),

@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "aistudio2api"
-	PluginVersion = "1.2.13"
+	PluginVersion = "1.2.14"
 	ProviderID    = "aistudio2api"
 )
 
@@ -43,12 +43,16 @@ type PluginConfig struct {
 	YouTubeLinks           *bool         `json:"youtube_links" yaml:"youtube_links"`
 	FirstEventHedge        string        `json:"first_event_hedge" yaml:"first_event_hedge"`
 	FirstEventHedgeModels  string        `json:"first_event_hedge_models" yaml:"first_event_hedge_models"`
+	FirstEventTimeout      string        `json:"first_event_timeout" yaml:"first_event_timeout"`
 	SearchModelAliases     *bool         `json:"search_model_aliases" yaml:"search_model_aliases"`
 	DiscoverHiddenModels   *bool         `json:"discover_hidden_models" yaml:"discover_hidden_models"`
 	GoogleSearch           *bool         `json:"google_search" yaml:"google_search"`
 	EnableAssistantModels  *bool         `json:"enable_assistant_models" yaml:"enable_assistant_models"`
 	ContinuationRewrite    *bool         `json:"continuation_rewrite" yaml:"continuation_rewrite"`
 	ContinuationPrompt     string        `json:"continuation_prompt" yaml:"continuation_prompt"`
+	ReplyTool              *bool         `json:"reply_tool" yaml:"reply_tool"`
+	UserMessageRewrite     string        `json:"user_message_rewrite" yaml:"user_message_rewrite"`
+	ThinkingGuard          *bool         `json:"thinking_guard" yaml:"thinking_guard"`
 	AutoStart              *bool         `json:"auto_start" yaml:"auto_start"`
 	PinExecutorAccount     *bool         `json:"pin_executor_account" yaml:"pin_executor_account"`
 	RouteUnprefixedModels  *bool         `json:"route_unprefixed_models" yaml:"route_unprefixed_models"`
@@ -149,6 +153,9 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 			if pcfg.FirstEventHedgeModels == "" {
 				pcfg.FirstEventHedgeModels = opt.FirstEventHedgeModels
 			}
+			if pcfg.FirstEventTimeout == "" {
+				pcfg.FirstEventTimeout = opt.FirstEventTimeout
+			}
 			if pcfg.SearchModelAliases == nil {
 				pcfg.SearchModelAliases = opt.SearchModelAliases
 			}
@@ -166,6 +173,15 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 			}
 			if pcfg.ContinuationPrompt == "" {
 				pcfg.ContinuationPrompt = opt.ContinuationPrompt
+			}
+			if pcfg.ReplyTool == nil {
+				pcfg.ReplyTool = opt.ReplyTool
+			}
+			if pcfg.UserMessageRewrite == "" {
+				pcfg.UserMessageRewrite = opt.UserMessageRewrite
+			}
+			if pcfg.ThinkingGuard == nil {
+				pcfg.ThinkingGuard = opt.ThinkingGuard
 			}
 			if pcfg.AutoStart == nil {
 				pcfg.AutoStart = opt.AutoStart
@@ -298,6 +314,16 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 	}
 	cfg.FirstEventHedge = hedge
 	cfg.FirstEventHedgeModels = hedgeModels
+	firstEventTimeout := strings.ToLower(strings.TrimSpace(pcfg.FirstEventTimeout))
+	if firstEventTimeout == "" {
+		firstEventTimeout = strings.ToLower(strings.TrimSpace(os.Getenv("FIRST_EVENT_TIMEOUT")))
+	}
+	if firstEventTimeout == "" {
+		firstEventTimeout = config.FirstEventTimeoutOff
+	}
+	if _, err := config.ParseFirstEventTimeout(firstEventTimeout); err == nil {
+		cfg.FirstEventTimeout = firstEventTimeout
+	}
 	cfg.SearchModelAliases = boolOrDefault(pcfg.SearchModelAliases, true)
 	cfg.DiscoverHiddenModels = boolOrDefault(pcfg.DiscoverHiddenModels, false)
 	cfg.GoogleSearch = boolOrDefault(pcfg.GoogleSearch, false)
@@ -306,6 +332,18 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 	if strings.TrimSpace(pcfg.ContinuationPrompt) != "" {
 		cfg.ContinuationPrompt = strings.TrimSpace(pcfg.ContinuationPrompt)
 	}
+	cfg.ReplyTool = boolOrDefault(pcfg.ReplyTool, false)
+	userMessageRewrite := strings.ToLower(strings.TrimSpace(pcfg.UserMessageRewrite))
+	if userMessageRewrite == "" {
+		userMessageRewrite = strings.ToLower(strings.TrimSpace(os.Getenv("USER_MESSAGE_REWRITE")))
+	}
+	switch userMessageRewrite {
+	case config.UserMessageRewriteTraditional, config.UserMessageRewriteMartian:
+		cfg.UserMessageRewrite = userMessageRewrite
+	default:
+		cfg.UserMessageRewrite = config.UserMessageRewriteOff
+	}
+	cfg.ThinkingGuard = boolOrDefault(pcfg.ThinkingGuard, false)
 	cfg.AutoStart = boolOrDefault(pcfg.AutoStart, true)
 	cfg.MediaOutput = config.MediaOutputInline
 	cfg.AllowedMCPHosts = strings.TrimSpace(pcfg.AllowedMCPHosts)

@@ -844,7 +844,7 @@ func inlineMediaKeyOf(part Part) inlineMediaKey {
 	return inlineMediaKey{mime: part.InlineData.MIME, sha256: base64.StdEncoding.EncodeToString(digest[:]), name: part.DisplayName}
 }
 
-// InlineMediaAccount 返回已上传 contents 中最多内联附件的账户，没有账户上传过时返回空串
+// InlineMediaAccount 返回已上传 contents 中最多未过期内联附件的可用账户，没有符合条件的账户时返回空串
 func (p *AccountPool) InlineMediaAccount(contents []Content) string {
 	keys := make(map[inlineMediaKey]bool)
 	for _, content := range contents {
@@ -859,11 +859,15 @@ func (p *AccountPool) InlineMediaAccount(contents []Content) string {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	now := time.Now().UTC()
 	best, bestHits := "", 0
 	for _, account := range p.accounts {
+		if !account.Config.Enabled || account.State != AccountReady {
+			continue
+		}
 		hits := 0
 		for _, binding := range account.runtime.Resources {
-			if binding.Kind == "inline-media" && keys[inlineMediaKey{mime: binding.MIME, sha256: binding.SHA256, name: binding.DisplayName}] {
+			if binding.Kind == "inline-media" && binding.expiresAt().After(now) && keys[inlineMediaKey{mime: binding.MIME, sha256: binding.SHA256, name: binding.DisplayName}] {
 				hits++
 			}
 		}
@@ -1178,6 +1182,10 @@ func (s *PooledService) UploadInlineMediaToLease(
 			}
 			return nil, nil, errors.Join(err, temporary.Cleanup())
 		}
+		if driveAuthorizationMissing(folderErr) {
+			temporary.release = s.useInlineMedia(used)
+			return rewritten, temporary, nil
+		}
 	}
 	for _, id := range expired {
 		temporary.copies = append(temporary.copies, temporaryDriveCopy{id: id, token: token, bound: true})
@@ -1187,8 +1195,16 @@ func (s *PooledService) UploadInlineMediaToLease(
 		drive := s.client.transport.(DriveTransport)
 		uploadCtx, cancelUploads := context.WithCancel(targetCtx)
 		resultChannel := make(chan uploadResult, len(pending))
+		sem := make(chan struct{}, min(len(pending), 4))
 		for index, job := range pending {
 			go func(index int, job uploadJob) {
+				select {
+				case sem <- struct{}{}:
+				case <-uploadCtx.Done():
+					resultChannel <- uploadResult{index: index, err: uploadCtx.Err()}
+					return
+				}
+				defer func() { <-sem }()
 				file, err := drive.UploadDrive(uploadCtx, targetID, token, UploadRequest{
 					AccountID: targetID,
 					Name:      job.name,
@@ -1315,7 +1331,7 @@ func (t *MakerSuiteHTTPTransport) UploadDrive(ctx context.Context, accountID str
 	if owned {
 		defer func() { err = errors.Join(err, lease.Release()) }()
 	}
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -1459,7 +1475,7 @@ func (t *MakerSuiteHTTPTransport) getDriveFile(ctx context.Context, accountID, t
 	if err != nil {
 		return err
 	}
-	client, err := t.clientForProxy(account.EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(account)
 	if err != nil {
 		return err
 	}
@@ -1721,7 +1737,7 @@ func (t *MakerSuiteHTTPTransport) DownloadDrive(ctx context.Context, accountID s
 		return MediaStream{}, release(err)
 	}
 	httpRequest.Header.Set("Authorization", "Bearer "+token)
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return MediaStream{}, release(err)
 	}
@@ -1761,7 +1777,7 @@ func (t *MakerSuiteHTTPTransport) DeleteDrive(ctx context.Context, accountID str
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return err
 	}
@@ -1794,7 +1810,7 @@ func (t *MakerSuiteHTTPTransport) DriveFileExists(ctx context.Context, accountID
 		return false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	client, err := t.clientForProxy(lease.Account().EffectiveProxy(t.globalProxy))
+	client, err := t.clientForAccount(lease.Account())
 	if err != nil {
 		return false, err
 	}

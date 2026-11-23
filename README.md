@@ -65,12 +65,12 @@ flowchart LR
 
 ### 方式二：从 GitHub Releases 下载预编译包
 1. 前往 [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases) 下载对应平台的压缩包：
-   - macOS Apple Silicon: `aistudio2api_1.2.13_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.13_darwin_amd64.zip`
-   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.13_linux_amd64.zip`
-   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.13_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.13_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.13_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.14_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.14_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.14_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.14_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.14_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.14_windows_arm64.zip`
 2. 解压出动态库文件（`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`），放入 CLIProxyAPI 的插件目录：
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}
@@ -146,6 +146,10 @@ plugins:
 | `enable_assistant_models` | `bool` | `false` | 是否开启高风控 `-build` 写代码助手通道（默认关闭以防账号被 Google 封禁，仅建议测试账号开启） |
 | `allowed_mcp_hosts` | `string` | `""` | 管理员允许宿主连接的受信任 MCP 服务器主机/源白名单（逗号分隔，例如 `mcp.example.com,*.trusted.example.com`；默认留空禁用宿主侧 MCP 连接，并始终禁止非公网 IP 与非白名单重定向） |
 | `allowed_webhook_hosts` | `string` | `""` | 管理员允许投递后台交互 Webhook 的受信任主机/源白名单（逗号分隔；默认留空禁用 Webhook 出站投递，并始终禁止非公网 IP 与重定向） |
+| `first_event_timeout` | `string` | `"off"` | 单次尝试从取得账户起等待上游首个事件的超时时间（`off` 不限制，或填写正整数秒如 `"30"`；超时后自动换号重试） |
+| `reply_tool` | `bool` | `false` | For SillyTavern：经内部 `final` 工具交付正文，减轻长对话与角色扮演场景的流式截断 |
+| `user_message_rewrite` | `enum` | `"off"` | For SillyTavern：发送前将用户消息改写为繁体（`"traditional"`）或火星文（`"martian"`），并要求模型默认以简体中文回复 |
+| `thinking_guard` | `bool` | `false` | For SillyTavern：引导思考阶段保持简洁抽象不复述敏感词并将思考上限收敛到低档，减轻思考阶段触发过滤截断 |
 
 ---
 
