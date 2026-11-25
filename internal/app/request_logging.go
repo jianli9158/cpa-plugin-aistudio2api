@@ -17,7 +17,7 @@ func requestLogData(entry api.AccessLog) *api.RequestLog {
 	data := &api.RequestLog{
 		ID: entry.RequestID, Model: entry.Model, Method: entry.Method, Path: entry.Path,
 		Status: entry.Status, DurationMS: float64(entry.Latency) / float64(time.Millisecond),
-		ToolCalls: entry.ToolCalls, FinishReason: entry.FinishReason, Error: entry.Error,
+		ToolCalls: entry.ToolCalls, ReplyTool: entry.ReplyTool, FinishReason: entry.FinishReason, Error: entry.Error,
 		InputMessages: entry.InputMessages, InputTextChars: entry.InputTextChars,
 		InputMedia: entry.InputMedia, InputMediaBytes: entry.InputMediaBytes, InputFiles: entry.InputFiles,
 		FirstEventMS: float64(entry.FirstEvent) / float64(time.Millisecond), UpstreamBytes: entry.UpstreamBytes,
@@ -76,6 +76,12 @@ func requestOutcome(entry api.AccessLog) (string, string, string) {
 // finishedRequestLog 投影请求结果日志，失败且没有错误信息时记录 HTTP 状态
 func finishedRequestLog(entry api.AccessLog) (*api.RequestLog, string, string) {
 	data := requestLogData(entry)
+	if entry.ReplyTool {
+		calls := entry.ReplyToolCalls
+		continuations := entry.ReplyToolContinuations
+		data.ReplyToolCalls = &calls
+		data.ReplyToolContinuations = &continuations
+	}
 	state, level, message := requestOutcome(entry)
 	data.State = state
 	if state == "failed" && data.Error == "" {

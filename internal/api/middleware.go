@@ -44,6 +44,9 @@ type accessLogMetadata struct {
 	upstreamBytes   int64
 	usage           *aistudio.Usage
 	toolCalls       int
+	replyTool              bool
+	replyToolCalls         int
+	replyToolContinuations int
 	inputMessages   int
 	inputTextChars  int
 	inputMedia      int
@@ -135,6 +138,7 @@ func (metadata *accessLogMetadata) finished(status int, disconnected bool) Acces
 	return AccessLog{
 		Status: status, FirstEvent: metadata.firstEvent, FirstOutput: metadata.firstOutput, TrailingError: metadata.trailingError, QueueWait: metadata.queueWait, Proof: metadata.proof,
 		UpstreamBytes: metadata.upstreamBytes, Usage: metadata.usage, ToolCalls: metadata.toolCalls,
+		ReplyTool: metadata.replyTool, ReplyToolCalls: metadata.replyToolCalls, ReplyToolContinuations: metadata.replyToolContinuations,
 		InputMessages: metadata.inputMessages, InputTextChars: metadata.inputTextChars,
 		InputMedia: metadata.inputMedia, InputMediaBytes: metadata.inputMediaBytes, InputFiles: metadata.inputFiles,
 		Temperature: metadata.temperature, TopP: metadata.topP, Thinking: metadata.thinking, MaxOutputTokens: metadata.maxOutputTokens,
@@ -403,6 +407,35 @@ func SetAccessLogGenerationResult(ctx context.Context, usage *aistudio.Usage, to
 			metadata.usage = &value
 		}
 		metadata.toolCalls = toolCalls
+		metadata.mu.Unlock()
+	}
+}
+
+// SetAccessLogReplyTool 记录本次生成尝试是否实际启用回复工具并重置 final 调用与续接轮数计数
+func SetAccessLogReplyTool(ctx context.Context, enabled bool) {
+	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
+		metadata.mu.Lock()
+		metadata.replyTool = enabled
+		metadata.replyToolCalls = 0
+		metadata.replyToolContinuations = 0
+		metadata.mu.Unlock()
+	}
+}
+
+// AddAccessLogReplyToolCall 累加本次生成解包的回复工具 final 调用次数
+func AddAccessLogReplyToolCall(ctx context.Context) {
+	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
+		metadata.mu.Lock()
+		metadata.replyToolCalls++
+		metadata.mu.Unlock()
+	}
+}
+
+// AddAccessLogReplyToolContinuation 累加本次生成回复工具 more=true 触发的自动续接轮数
+func AddAccessLogReplyToolContinuation(ctx context.Context) {
+	if metadata, ok := ctx.Value(accessLogContextKey{}).(*accessLogMetadata); ok {
+		metadata.mu.Lock()
+		metadata.replyToolContinuations++
 		metadata.mu.Unlock()
 	}
 }

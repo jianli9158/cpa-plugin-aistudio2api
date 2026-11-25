@@ -65,12 +65,12 @@ Open the CLIProxyAPI Management Center (or EasyCLIProxyAPI desktop app), navigat
 
 ### Option 2: Download Prebuilt Binary from GitHub Releases
 1. Download the archive for your platform from [Releases](https://github.com/jianli9158/cpa-plugin-aistudio2api/releases):
-   - macOS Apple Silicon: `aistudio2api_1.2.14_darwin_arm64.zip`
-   - macOS Intel: `aistudio2api_1.2.14_darwin_amd64.zip`
-   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.14_linux_amd64.zip`
-   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.14_linux_arm64.zip`
-   - Windows x86_64: `aistudio2api_1.2.14_windows_amd64.zip`
-   - Windows ARM64: `aistudio2api_1.2.14_windows_arm64.zip`
+   - macOS Apple Silicon: `aistudio2api_1.2.15_darwin_arm64.zip`
+   - macOS Intel: `aistudio2api_1.2.15_darwin_amd64.zip`
+   - Linux x86_64 (glibc 2.28+): `aistudio2api_1.2.15_linux_amd64.zip`
+   - Linux ARM64 (glibc 2.28+): `aistudio2api_1.2.15_linux_arm64.zip`
+   - Windows x86_64: `aistudio2api_1.2.15_windows_amd64.zip`
+   - Windows ARM64: `aistudio2api_1.2.15_windows_arm64.zip`
 2. Extract the dynamic library (`aistudio2api.dylib` / `aistudio2api.so` / `aistudio2api.dll`) into CLIProxyAPI's plugin directory:
    ```text
    plugins/<goos>/<goarch>/aistudio2api.{dylib,so,dll}

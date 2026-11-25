@@ -150,7 +150,8 @@ func (rt *PluginRuntime) HedgeSettings() (bool, time.Duration, []string) {
 	if !ok || ts == nil {
 		return false, 0, nil
 	}
-	return ts.hedgeAuto, ts.hedgeAfter, append([]string(nil), ts.hedgeModels...)
+	policy := ts.currentFirstEventPolicy()
+	return policy.hedgeAuto, policy.hedgeAfter, append([]string(nil), policy.hedgeModels...)
 }
 
 // WarmWorkerTarget returns the prewarm worker target configured on the underlying worker manager.
@@ -227,12 +228,11 @@ func (rt *PluginRuntime) ApplyLiveConfig(cfg config.Config) {
 		cfg.PerAccountConcurrency,
 	)
 	if ts, ok := cur.service.(*trackedService); ok && ts != nil {
+		ts.ApplyHotConfig(cfg)
 		ts.SetFirstEventHedge(cfg.FirstEventHedge, cfg.FirstEventHedgeModels)
 		ts.SetFirstEventTimeout(cfg.FirstEventTimeout)
 		ts.buildNativeNonstream = cfg.BuildNativeNonstream
 		ts.discoverHiddenModels = cfg.DiscoverHiddenModels
-		mapping, _ := config.ParseModelMapping(cfg.ModelMapping)
-		ts.SetRequestPolicy(mapping, cfg.MaxAccountSwitches)
 		rt.Manager.settings.Store(requestSettingsOf(cfg))
 		if pooled, ok := ts.service.(*aistudio.PooledService); ok && pooled != nil {
 			pooled.BuildNativeNonstream = cfg.BuildNativeNonstream

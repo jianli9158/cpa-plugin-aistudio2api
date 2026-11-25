@@ -407,6 +407,18 @@ func (p *Plugin) registrationPayload() rpcRegistration {
 					Default:     false,
 					Description: "For SillyTavern：引导思考阶段保持简洁抽象不复述敏感词并将思考上限收敛到低档，减轻思考阶段触发过滤截断",
 				},
+				{
+					Name:        "account_switch_interval",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "off",
+					Description: "同一请求内换号前的最短等待间隔（off 表示立即换号，或填写正整数秒，如 3）",
+				},
+				{
+					Name:        "max_quota_switches",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Default:     "off",
+					Description: "同一请求因额度耗尽触发换号的最大次数上限（off 表示不限制，0 表示不换号，或填写正整数）",
+				},
 			},
 		},
 		Capabilities: rpcCapabilities{

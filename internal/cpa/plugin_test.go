@@ -1510,13 +1510,14 @@ func TestPluginConfigSillyTavernAndFirstEventTimeout(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("USERPROFILE", tmpDir)
-	raw := []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\nfirst_event_timeout: \"45\"\nreply_tool: true\nuser_message_rewrite: martian\nthinking_guard: true\n")
+	raw := []byte("data_dir: \"" + filepath.ToSlash(tmpDir) + "\"\nwaa_backend: spidermonkey\nauto_start: false\nsync_auth_files: false\nfirst_event_timeout: \"45\"\nreply_tool: true\nuser_message_rewrite: martian\nthinking_guard: true\naccount_switch_interval: \"3\"\nmax_quota_switches: \"2\"\n")
 	_, cfg, err := cpa.ParsePluginConfig(raw)
 	if err != nil {
 		t.Fatalf("ParsePluginConfig failed: %v", err)
 	}
-	if cfg.FirstEventTimeout != "45" || !cfg.ReplyTool || cfg.UserMessageRewrite != "martian" || !cfg.ThinkingGuard {
-		t.Fatalf("unexpected parsed config: timeout=%q reply=%v rewrite=%q guard=%v", cfg.FirstEventTimeout, cfg.ReplyTool, cfg.UserMessageRewrite, cfg.ThinkingGuard)
+	if cfg.FirstEventTimeout != "45" || !cfg.ReplyTool || cfg.UserMessageRewrite != "martian" || !cfg.ThinkingGuard || cfg.AccountSwitchInterval != "3" || cfg.MaxQuotaSwitches != "2" {
+		t.Fatalf("unexpected parsed config: timeout=%q reply=%v rewrite=%q guard=%v switchInterval=%q maxQuotaSwitches=%q",
+			cfg.FirstEventTimeout, cfg.ReplyTool, cfg.UserMessageRewrite, cfg.ThinkingGuard, cfg.AccountSwitchInterval, cfg.MaxQuotaSwitches)
 	}
 
 	p := cpa.NewPlugin(nil)
@@ -1537,7 +1538,7 @@ func TestPluginConfigSillyTavernAndFirstEventTimeout(t *testing.T) {
 	for _, f := range parsedReg.Metadata.ConfigFields {
 		names[f.Name] = true
 	}
-	for _, required := range []string{"first_event_timeout", "reply_tool", "user_message_rewrite", "thinking_guard"} {
+	for _, required := range []string{"first_event_timeout", "reply_tool", "user_message_rewrite", "thinking_guard", "account_switch_interval", "max_quota_switches"} {
 		if !names[required] {
 			t.Fatalf("expected ConfigField %q in plugin registration", required)
 		}

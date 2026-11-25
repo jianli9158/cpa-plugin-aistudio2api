@@ -114,6 +114,9 @@ type RequestLog struct {
 	DurationMS      float64                `json:"duration_ms,omitempty"`
 	Usage           *RequestLogUsage       `json:"usage,omitempty"`
 	ToolCalls       int                    `json:"tool_calls,omitempty"`
+	ReplyTool              bool                   `json:"reply_tool,omitempty"`
+	ReplyToolCalls         *int                   `json:"reply_tool_calls,omitempty"`
+	ReplyToolContinuations *int                   `json:"reply_tool_continuations,omitempty"`
 	FinishReason    string                 `json:"finish_reason,omitempty"`
 	Error           string                 `json:"error,omitempty"`
 	InputMessages   int                    `json:"input_messages,omitempty"`
@@ -159,6 +162,9 @@ type AccessLog struct {
 	UpstreamBytes   int64
 	Usage           *aistudio.Usage
 	ToolCalls       int
+	ReplyTool              bool
+	ReplyToolCalls         int
+	ReplyToolContinuations int
 	InputMessages   int
 	InputTextChars  int
 	InputMedia      int

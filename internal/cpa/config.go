@@ -13,7 +13,7 @@ import (
 
 const (
 	PluginID      = "aistudio2api"
-	PluginVersion = "1.2.14"
+	PluginVersion = "1.2.15"
 	ProviderID    = "aistudio2api"
 )
 
@@ -32,6 +32,8 @@ type PluginConfig struct {
 	RoutingStrategy        string        `json:"routing_strategy" yaml:"routing_strategy"`
 	AccountOrder           string        `json:"account_order" yaml:"account_order"`
 	MaxAccountSwitches     *int          `json:"max_account_switches" yaml:"max_account_switches"`
+	AccountSwitchInterval  string        `json:"account_switch_interval" yaml:"account_switch_interval"`
+	MaxQuotaSwitches       string        `json:"max_quota_switches" yaml:"max_quota_switches"`
 	MaxRegenerations       *int          `json:"max_regenerations" yaml:"max_regenerations"`
 	ModelAccounts          string        `json:"model_accounts" yaml:"model_accounts"`
 	ModelAliases           string        `json:"model_aliases" yaml:"model_aliases"`
@@ -119,6 +121,12 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 			}
 			if pcfg.MaxAccountSwitches == nil {
 				pcfg.MaxAccountSwitches = opt.MaxAccountSwitches
+			}
+			if pcfg.AccountSwitchInterval == "" {
+				pcfg.AccountSwitchInterval = opt.AccountSwitchInterval
+			}
+			if pcfg.MaxQuotaSwitches == "" {
+				pcfg.MaxQuotaSwitches = opt.MaxQuotaSwitches
 			}
 			if pcfg.MaxRegenerations == nil {
 				pcfg.MaxRegenerations = opt.MaxRegenerations
@@ -290,6 +298,26 @@ func ParsePluginConfig(raw []byte) (PluginConfig, config.Config, error) {
 	cfg.AccountOrder = strings.TrimSpace(pcfg.AccountOrder)
 	if pcfg.MaxAccountSwitches != nil && *pcfg.MaxAccountSwitches >= 0 {
 		cfg.MaxAccountSwitches = *pcfg.MaxAccountSwitches
+	}
+	switchInterval := strings.ToLower(strings.TrimSpace(pcfg.AccountSwitchInterval))
+	if switchInterval == "" {
+		switchInterval = strings.ToLower(strings.TrimSpace(os.Getenv("ACCOUNT_SWITCH_INTERVAL")))
+	}
+	if switchInterval == "" {
+		switchInterval = config.AccountSwitchIntervalOff
+	}
+	if _, err := config.ParseAccountSwitchInterval(switchInterval); err == nil {
+		cfg.AccountSwitchInterval = switchInterval
+	}
+	maxQuotaSwitches := strings.ToLower(strings.TrimSpace(pcfg.MaxQuotaSwitches))
+	if maxQuotaSwitches == "" {
+		maxQuotaSwitches = strings.ToLower(strings.TrimSpace(os.Getenv("MAX_QUOTA_SWITCHES")))
+	}
+	if maxQuotaSwitches == "" {
+		maxQuotaSwitches = config.MaxQuotaSwitchesOff
+	}
+	if _, _, err := config.ParseMaxQuotaSwitches(maxQuotaSwitches); err == nil {
+		cfg.MaxQuotaSwitches = maxQuotaSwitches
 	}
 	if pcfg.MaxRegenerations != nil && *pcfg.MaxRegenerations >= 0 {
 		cfg.MaxRegenerations = *pcfg.MaxRegenerations
